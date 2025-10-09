@@ -3,7 +3,7 @@ import { supabase } from "./lib/supabase";
 import { Map } from "./components/Map";
 import { SidebarUser } from "./components/SidebarUser";
 import { HorizontalUserScroll } from "./components/UserList";
-import { Loader2, MapPin, Wifi, Menu, LogOut, User, RefreshCw } from "lucide-react";
+import { Loader2, MapPin, Wifi, Menu, LogOut, User } from "lucide-react";
 import "./index.css";
 
 type User = {
@@ -53,13 +53,13 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
     console.log("🆕 Creating new user profile for:", userId);
     
     // Pastikan gender valid sesuai constraint database
-    const validGender = "male";
+    const validGender = "male"; // Default value yang sesuai dengan constraint
     
     const newProfile = {
       id: userId,
       username: email.split('@')[0],
       email: email,
-      gender: validGender,
+      gender: validGender, // PASTIKAN ini 'male' atau 'female'
       avatar_url: null,
       is_online: true,
       last_online: new Date().toISOString(),
@@ -81,7 +81,8 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
     if (error) {
       console.error("❌ Error creating profile:", error);
       
-      if (error.code === '23505') {
+      // Detailed error handling
+      if (error.code === '23505') { // Unique violation - profile sudah ada
         console.log("🔄 Profile already exists, fetching existing...");
         const { data: existingData } = await supabase
           .from("profiles")
@@ -92,6 +93,26 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
         if (existingData) {
           console.log("✅ Using existing profile");
           return existingData;
+        }
+      }
+      
+      if (error.code === '23514') { // Check constraint violation (gender)
+        console.error("❌ Gender constraint violation, retrying with valid gender...");
+        // Coba dengan gender yang valid
+        const fallbackProfile = {
+          ...newProfile,
+          gender: "male" // Force valid gender
+        };
+        
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from("profiles")
+          .insert(fallbackProfile)
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .single();
+
+        if (!fallbackError && fallbackData) {
+          console.log("✅ Profile created with fixed gender");
+          return fallbackData;
         }
       }
       
@@ -116,12 +137,7 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
         return minimalData;
       }
       
-      console.log("⚠️ Using default profile due to creation failure");
-      return {
-        gender: "male",
-        avatar_url: null,
-        is_online: true
-      };
+      throw error;
     }
 
     console.log("✅ New profile created successfully");
@@ -129,8 +145,9 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
 
   } catch (error) {
     console.error("❌ Create profile error:", error);
+    // Return default profile dengan gender yang valid
     return {
-      gender: "male",
+      gender: "male", // PASTIKAN valid
       avatar_url: null,
       is_online: true
     };
@@ -180,7 +197,7 @@ const handleLogout = async (userId: string) => {
   try {
     console.log("🚪 Logging out and cleaning up user data...");
     
-    // Update status online menjadi false
+    // 1. Update status online menjadi false
     await supabase
       .from("profiles")
       .update({
@@ -189,22 +206,27 @@ const handleLogout = async (userId: string) => {
       })
       .eq("id", userId);
 
-    // Sign out dari auth
-    await supabase.auth.signOut();
+    // 2. Sign out dari auth (ini akan trigger ON DELETE CASCADE di database)
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error("Sign out error:", error);
+      throw error;
+    }
 
-    // Clear local storage
+    // 3. Clear local storage
     localStorage.removeItem("user");
     localStorage.removeItem("userLocation");
     localStorage.removeItem("userLocationTime");
 
     console.log("✅ Logout successful");
     
-    // Redirect ke halaman login
-    window.location.href = window.location.origin;
+    // 4. Redirect ke halaman login
+    window.location.reload();
     
   } catch (error) {
     console.error("Logout error:", error);
-    window.location.href = window.location.origin;
+    // Force reload anyway
+    window.location.reload();
   }
 };
 
@@ -222,24 +244,18 @@ export const App: React.FC = () => {
   const [userEmail, setUserEmail] = useState<string>("");
   const [profileCreated, setProfileCreated] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [initializationError, setInitializationError] = useState<boolean>(false);
 
   // ✅ FIXED: Better auth state listener dengan error handling
   useEffect(() => {
-    let mounted = true;
-
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!mounted) return;
-
       console.log(`🔄 Auth state changed: ${event}`, session);
       
       try {
         if (event === 'SIGNED_IN' && session) {
           console.log("✅ User signed in, setting up profile...");
           setAuthError(null);
-          setInitializationError(false);
           
           const userData = { 
             id: session.user.id, 
@@ -252,151 +268,122 @@ export const App: React.FC = () => {
 
           setLoadStep("Membuat profil...");
           
-          // Auto create profile
-          try {
-            const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
-            setCurrentUserGender(userProfile.gender || "male");
-            setCurrentUserAvatar(userProfile.avatar_url || null);
-            setProfileCreated(true);
-            
-            console.log("✅ Profile setup completed");
-            
-            // Set online status
-            await updateOnlineStatus(session.user.id, true);
-            
-            setLoading(false);
-            setIsRedirecting(false);
-          } catch (error) {
-            console.error("❌ Profile setup failed:", error);
-            // Even if profile creation fails, still let user in
-            setProfileCreated(true);
-            setLoading(false);
-            setIsRedirecting(false);
-          }
+          // Auto create profile dengan retry mechanism
+          let retryCount = 0;
+          const maxRetries = 3;
+          
+          const createProfileWithRetry = async () => {
+            try {
+              const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+              setCurrentUserGender(userProfile.gender || "male");
+              setCurrentUserAvatar(userProfile.avatar_url || null);
+              setProfileCreated(true);
+              
+              console.log("✅ Profile setup completed");
+              
+              // Set online status
+              await updateOnlineStatus(session.user.id, true);
+              
+              setLoading(false);
+              setIsRedirecting(false);
+            } catch (error) {
+              console.error(`❌ Profile setup failed (attempt ${retryCount + 1}/${maxRetries}):`, error);
+              
+              if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`🔄 Retrying profile creation... (${retryCount}/${maxRetries})`);
+                setTimeout(createProfileWithRetry, 1000 * retryCount);
+              } else {
+                console.error("❌ Max retries reached");
+                setAuthError("Gagal membuat profil pengguna. Silakan coba lagi.");
+                setLoading(false);
+                setIsRedirecting(false);
+              }
+            }
+          };
+          
+          createProfileWithRetry();
         }
         else if (event === 'SIGNED_OUT') {
           console.log("🚪 User signed out");
           setUser(null);
           setUserEmail("");
           setAuthError(null);
-          setInitializationError(false);
           localStorage.removeItem("user");
           setProfileCreated(false);
           setLoading(false);
+        }
+        else if (event === 'USER_UPDATED') {
+          console.log("👤 User updated");
+        }
+        else if (event === 'TOKEN_REFRESHED') {
+          console.log("🔄 Token refreshed");
         }
         else if (event === 'INITIAL_SESSION') {
           console.log("🔧 Initial session loaded");
         }
       } catch (error) {
         console.error("❌ Auth state change error:", error);
-        if (mounted) {
-          setLoading(false);
-          setIsRedirecting(false);
-        }
+        setAuthError("Terjadi kesalahan saat memproses login.");
+        setLoading(false);
+        setIsRedirecting(false);
       }
     });
 
-    return () => {
-      mounted = false;
-      subscription.unsubscribe();
-    };
+    return () => subscription.unsubscribe();
   }, []);
 
-  // ✅ Initialize app - cek session yang ada dengan error handling
+  // ✅ Initialize app - cek session yang ada
   useEffect(() => {
-    let mounted = true;
-
     const init = async () => {
       try {
-        if (!mounted) return;
-
         setLoadStep("Mengecek sesi pengguna...");
 
-        // Cek koneksi Supabase dulu
-        try {
-          const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (session?.user) {
+          console.log("✅ Existing session found:", session.user.id);
+          const userData = { 
+            id: session.user.id, 
+            email: session.user.email! 
+          };
+          setUser(userData);
+          setUserEmail(session.user.email!);
+          localStorage.setItem("user", JSON.stringify(userData));
+
+          setLoadStep("Menyiapkan profil...");
           
-          if (sessionError) {
-            throw new Error(`Auth error: ${sessionError.message}`);
+          // Ensure profile exists
+          const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+          setCurrentUserGender(userProfile.gender || "male");
+          setCurrentUserAvatar(userProfile.avatar_url || null);
+          setProfileCreated(true);
+
+          setLoadStep("Menyiapkan peta...");
+          
+          // Load initial nearby users
+          const cachedLocation = getCachedLocation();
+          if (cachedLocation) {
+            setLocation(cachedLocation);
+            loadNearbyUsers(session.user.id, cachedLocation);
           }
 
-          if (sessionData?.session?.user) {
-            console.log("✅ Existing session found:", sessionData.session.user.id);
-            const userData = { 
-              id: sessionData.session.user.id, 
-              email: sessionData.session.user.email! 
-            };
-            
-            if (!mounted) return;
-            
-            setUser(userData);
-            setUserEmail(sessionData.session.user.email!);
-            localStorage.setItem("user", JSON.stringify(userData));
-
-            setLoadStep("Menyiapkan profil...");
-            
-            // Ensure profile exists - dengan timeout
-            try {
-              const userProfile = await Promise.race([
-                ensureUserProfile(sessionData.session.user.id, sessionData.session.user.email!),
-                new Promise<UserProfile>((_, reject) => 
-                  setTimeout(() => reject(new Error('Profile creation timeout')), 10000)
-                )
-              ]);
-              
-              if (!mounted) return;
-              
-              setCurrentUserGender(userProfile.gender || "male");
-              setCurrentUserAvatar(userProfile.avatar_url || null);
-              setProfileCreated(true);
-
-              setLoadStep("Menyiapkan peta...");
-              
-              // Load initial nearby users
-              const cachedLocation = getCachedLocation();
-              if (cachedLocation) {
-                setLocation(cachedLocation);
-                loadNearbyUsers(sessionData.session.user.id, cachedLocation);
-              }
-
-              await updateOnlineStatus(sessionData.session.user.id, true);
-              setLoading(false);
-              
-            } catch (profileError) {
-              console.error("❌ Profile setup error:", profileError);
-              if (!mounted) return;
-              // Continue even if profile setup fails
-              setProfileCreated(true);
-              setLoading(false);
-            }
-          } else {
-            // Tidak ada session, tampilkan login screen
-            console.log("🔐 No session found");
-            if (mounted) {
-              setLoading(false);
-            }
-          }
-        } catch (authError) {
-          console.error("❌ Auth check error:", authError);
-          if (mounted) {
-            setInitializationError(true);
-            setLoading(false);
-          }
+          await updateOnlineStatus(session.user.id, true);
+          setLoading(false);
+          
+        } else {
+          // Tidak ada session, tampilkan login screen
+          console.log("🔐 No session found");
+          setLoading(false);
         }
       } catch (error) {
         console.error("❌ Initialization error:", error);
-        if (mounted) {
-          setInitializationError(true);
-          setLoading(false);
-        }
+        setAuthError("Gagal memuat aplikasi. Silakan refresh halaman.");
+        setLoading(false);
       }
     };
 
     init();
-
-    return () => {
-      mounted = false;
-    };
   }, []);
 
   // ✅ HYBRID: Smart location tracking dengan optimized updates
@@ -449,11 +436,6 @@ export const App: React.FC = () => {
     };
 
     // Start GPS tracking
-    if (!navigator.geolocation) {
-      console.error("❌ Geolocation not supported");
-      return () => {};
-    }
-
     watchId = navigator.geolocation.watchPosition(
       (position) => {
         const newLocation: [number, number] = [
@@ -523,7 +505,7 @@ export const App: React.FC = () => {
 
       if (error) {
         console.error("Supabase query error:", error);
-        return;
+        throw error;
       }
 
       if (data) {
@@ -677,7 +659,6 @@ export const App: React.FC = () => {
   const handleManualLogin = async () => {
     setIsRedirecting(true);
     setAuthError(null);
-    setInitializationError(false);
     setLoadStep("Mengarahkan ke Google...");
     try {
       console.log("🔐 Attempting Google login...");
@@ -691,10 +672,13 @@ export const App: React.FC = () => {
     } catch (error: any) {
       console.error("❌ Manual login failed:", error);
       
+      // Tampilkan error ke user
       if (error.message?.includes('popup')) {
         setAuthError("Popup login diblokir. Izinkan popup untuk website ini.");
+      } else if (error.message?.includes('configuration')) {
+        setAuthError("Error konfigurasi Google OAuth. Hubungi administrator.");
       } else {
-        setAuthError("Login gagal. Coba lagi.");
+        setAuthError("Login gagal. Coba lagi atau hubungi administrator.");
       }
       
       setIsRedirecting(false);
@@ -708,50 +692,10 @@ export const App: React.FC = () => {
     }
   };
 
-  // ✅ Refresh handler
-  const handleRefresh = () => {
-    window.location.reload();
-  };
-
   // ✅ Toggle sidebar handler
   const toggleSidebar = () => {
     setShowSidebar(prev => !prev);
   };
-
-  // ✅ Error screen - tampilkan jika initialization gagal
-  if (initializationError) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
-        <div className="text-center max-w-md mx-auto px-6">
-          <div className="w-20 h-20 mx-auto bg-gradient-to-r from-red-500 to-orange-600 rounded-3xl flex items-center justify-center shadow-lg mb-4">
-            <RefreshCw className="w-10 h-10 text-white" />
-          </div>
-          <h2 className="text-2xl font-bold text-gray-800 mb-3">Gagal Memuat Aplikasi</h2>
-          <p className="text-gray-600 mb-4">Terjadi kesalahan saat memuat aplikasi</p>
-          <p className="text-sm text-gray-500 mb-6">
-            Hal ini bisa disebabkan oleh masalah koneksi atau server sedang maintenance.
-          </p>
-          
-          <div className="flex gap-3">
-            <button
-              onClick={handleRefresh}
-              className="flex-1 px-6 py-3 bg-blue-500 text-white rounded-lg shadow hover:bg-blue-600 transition flex items-center justify-center gap-2"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Refresh Halaman
-            </button>
-            <button
-              onClick={handleManualLogin}
-              className="flex-1 px-6 py-3 bg-green-500 text-white rounded-lg shadow hover:bg-green-600 transition flex items-center justify-center gap-2"
-            >
-              <Wifi className="w-4 h-4" />
-              Login Ulang
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   // ✅ Loading screen
   if (loading || isRedirecting) {
@@ -801,7 +745,7 @@ export const App: React.FC = () => {
           <button
             onClick={handleManualLogin}
             disabled={isRedirecting}
-            className="px-8 py-3 bg-blue-500 text-white rounded-lg shadow hover:bg-blue-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mx-auto w-full mb-3"
+            className="px-8 py-3 bg-blue-500 text-white rounded-lg shadow hover:bg-blue-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mx-auto w-full"
           >
             {isRedirecting ? (
               <>
@@ -816,13 +760,9 @@ export const App: React.FC = () => {
             )}
           </button>
 
-          <button
-            onClick={handleRefresh}
-            className="px-8 py-2 bg-gray-500 text-white rounded-lg shadow hover:bg-gray-600 transition flex items-center justify-center gap-2 mx-auto w-full text-sm"
-          >
-            <RefreshCw className="w-4 h-4" />
-            Refresh Halaman
-          </button>
+          <p className="text-sm text-gray-500 mt-4">
+            Jika ada masalah, pastikan popup diizinkan dan coba refresh halaman
+          </p>
         </div>
       </div>
     );
