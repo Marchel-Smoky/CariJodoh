@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { supabase } from "./lib/supabase";
-import { Map } from "./components/Map";
+import  Map  from "./components/Map";
 import { SidebarUser } from "./components/SidebarUser";
 import { HorizontalUserScroll } from "./components/UserList";
-import { Loader2, MapPin, Wifi, Menu, LogOut, User, RefreshCw, AlertCircle } from "lucide-react";
+import { Loader2, MapPin, Wifi, Menu, LogOut, User } from "lucide-react";
 import "./index.css";
 
 type User = {
@@ -47,55 +47,143 @@ const signInWithGoogle = async () => {
   }
 };
 
-// ✅ OPTIMIZED: Fast profile creation dengan fallback
+// ✅ FIXED: Better auto create profile dengan validasi gender dan error handling
+const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
+  try {
+    console.log("🆕 Creating new user profile for:", userId);
+    
+    // Pastikan gender valid sesuai constraint database
+    const validGender = "male"; // Default value yang sesuai dengan constraint
+    
+    const newProfile = {
+      id: userId,
+      username: email.split('@')[0],
+      email: email,
+      gender: validGender, // PASTIKAN ini 'male' atau 'female'
+      avatar_url: null,
+      is_online: true,
+      last_online: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      latitude: null,
+      longitude: null,
+      location_updated_at: new Date().toISOString()
+    };
+
+    console.log("📝 Profile data to insert:", newProfile);
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .insert(newProfile)
+      .select("gender, avatar_url, latitude, longitude, is_online")
+      .single();
+
+    if (error) {
+      console.error("❌ Error creating profile:", error);
+      
+      // Detailed error handling
+      if (error.code === '23505') { // Unique violation - profile sudah ada
+        console.log("🔄 Profile already exists, fetching existing...");
+        const { data: existingData } = await supabase
+          .from("profiles")
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .eq("id", userId)
+          .single();
+        
+        if (existingData) {
+          console.log("✅ Using existing profile");
+          return existingData;
+        }
+      }
+      
+      if (error.code === '23514') { // Check constraint violation (gender)
+        console.error("❌ Gender constraint violation, retrying with valid gender...");
+        // Coba dengan gender yang valid
+        const fallbackProfile = {
+          ...newProfile,
+          gender: "male" // Force valid gender
+        };
+        
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from("profiles")
+          .insert(fallbackProfile)
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .single();
+
+        if (!fallbackError && fallbackData) {
+          console.log("✅ Profile created with fixed gender");
+          return fallbackData;
+        }
+      }
+      
+      // Coba minimal profile creation
+      console.log("🔄 Trying minimal profile creation...");
+      const minimalProfile = {
+        id: userId,
+        username: email.split('@')[0],
+        gender: "male",
+        is_online: true,
+        last_online: new Date().toISOString()
+      };
+
+      const { data: minimalData, error: minimalError } = await supabase
+        .from("profiles")
+        .insert(minimalProfile)
+        .select("gender, avatar_url, latitude, longitude, is_online")
+        .single();
+
+      if (!minimalError && minimalData) {
+        console.log("✅ Minimal profile created successfully");
+        return minimalData;
+      }
+      
+      throw error;
+    }
+
+    console.log("✅ New profile created successfully");
+    return data!;
+
+  } catch (error) {
+    console.error("❌ Create profile error:", error);
+    // Return default profile dengan gender yang valid
+    return {
+      gender: "male", // PASTIKAN valid
+      avatar_url: null,
+      is_online: true
+    };
+  }
+};
+
+// ✅ FIXED: Cek dan ensure user profile dengan retry logic
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
-    // ✅ Coba cepat: cek profile existing
+    console.log("🔍 Checking if profile exists for:", userId);
+    
+    // Cek apakah profile sudah ada
     const { data: existingProfile, error } = await supabase
       .from("profiles")
       .select("gender, avatar_url, latitude, longitude, is_online")
       .eq("id", userId)
       .maybeSingle();
 
-    if (!error && existingProfile) {
+    if (error && error.code !== 'PGRST116') {
+      console.error("Error checking profile:", error);
+    }
+
+    console.log("📊 Existing profile check result:", existingProfile);
+
+    // Jika profile sudah ada, return
+    if (existingProfile) {
       console.log("✅ Profile already exists");
       return existingProfile;
     }
 
-    // ✅ Buat profile baru dengan timeout
-    const newProfile = {
-      id: userId,
-      username: email.split('@')[0],
-      email: email,
-      gender: "male",
-      avatar_url: null,
-      is_online: true,
-      last_online: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { data: createdProfile, error: createError } = await supabase
-      .from("profiles")
-      .insert(newProfile)
-      .select("gender, avatar_url, latitude, longitude, is_online")
-      .single();
-
-    if (!createError && createdProfile) {
-      console.log("✅ New profile created successfully");
-      return createdProfile;
-    }
-
-    // ✅ Fallback ke default profile jika gagal
-    console.log("⚠️ Using default profile due to creation failure");
-    return {
-      gender: "male",
-      avatar_url: null,
-      is_online: true
-    };
+    // Jika belum ada, buat profile baru
+    console.log("🆕 Profile not found, creating new one...");
+    return await createUserProfile(userId, email);
 
   } catch (error) {
-    console.error("❌ Profile creation error:", error);
+    console.error("❌ Ensure profile error:", error);
     return {
       gender: "male",
       avatar_url: null,
@@ -157,11 +245,7 @@ export const App: React.FC = () => {
   const [profileCreated, setProfileCreated] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // ✅ Cache untuk mengurangi request
-  const [lastLocationUpdate, setLastLocationUpdate] = useState<number>(0);
-  const [lastUsersUpdate, setLastUsersUpdate] = useState<number>(0);
-
-  // ✅ FIXED: Fast auth state listener
+  // ✅ FIXED: Better auth state listener dengan error handling
   useEffect(() => {
     const {
       data: { subscription },
@@ -182,41 +266,43 @@ export const App: React.FC = () => {
           setUserEmail(session.user.email!);
           localStorage.setItem("user", JSON.stringify(userData));
 
-          setLoadStep("Menyiapkan profil...");
+          setLoadStep("Membuat profil...");
           
-          // ✅ OPTIMIZED: Profile setup dengan timeout
-          try {
-            const userProfile = await Promise.race([
-              ensureUserProfile(session.user.id, session.user.email!),
-              new Promise<UserProfile>((resolve) => 
-                setTimeout(() => resolve({
-                  gender: "male",
-                  avatar_url: null,
-                  is_online: true
-                }), 3000) // Timeout 3 detik
-              )
-            ]);
-            
-            setCurrentUserGender(userProfile.gender || "male");
-            setCurrentUserAvatar(userProfile.avatar_url || null);
-            setProfileCreated(true);
-            
-            console.log("✅ Profile setup completed");
-            
-            // Set online status
-            await updateOnlineStatus(session.user.id, true);
-            
-            setLoading(false);
-            setIsRedirecting(false);
-          } catch (profileError) {
-            console.error("❌ Profile setup error:", profileError);
-            // Fallback: tetap lanjut dengan default profile
-            setCurrentUserGender("male");
-            setCurrentUserAvatar(null);
-            setProfileCreated(true);
-            setLoading(false);
-            setIsRedirecting(false);
-          }
+          // Auto create profile dengan retry mechanism
+          let retryCount = 0;
+          const maxRetries = 3;
+          
+          const createProfileWithRetry = async () => {
+            try {
+              const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+              setCurrentUserGender(userProfile.gender || "male");
+              setCurrentUserAvatar(userProfile.avatar_url || null);
+              setProfileCreated(true);
+              
+              console.log("✅ Profile setup completed");
+              
+              // Set online status
+              await updateOnlineStatus(session.user.id, true);
+              
+              setLoading(false);
+              setIsRedirecting(false);
+            } catch (error) {
+              console.error(`❌ Profile setup failed (attempt ${retryCount + 1}/${maxRetries}):`, error);
+              
+              if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`🔄 Retrying profile creation... (${retryCount}/${maxRetries})`);
+                setTimeout(createProfileWithRetry, 1000 * retryCount);
+              } else {
+                console.error("❌ Max retries reached");
+                setAuthError("Gagal membuat profil pengguna. Silakan coba lagi.");
+                setLoading(false);
+                setIsRedirecting(false);
+              }
+            }
+          };
+          
+          createProfileWithRetry();
         }
         else if (event === 'SIGNED_OUT') {
           console.log("🚪 User signed out");
@@ -226,6 +312,12 @@ export const App: React.FC = () => {
           localStorage.removeItem("user");
           setProfileCreated(false);
           setLoading(false);
+        }
+        else if (event === 'USER_UPDATED') {
+          console.log("👤 User updated");
+        }
+        else if (event === 'TOKEN_REFRESHED') {
+          console.log("🔄 Token refreshed");
         }
         else if (event === 'INITIAL_SESSION') {
           console.log("🔧 Initial session loaded");
@@ -241,14 +333,10 @@ export const App: React.FC = () => {
     return () => subscription.unsubscribe();
   }, []);
 
-  // ✅ Initialize app - dengan timeout protection
+  // ✅ Initialize app - cek session yang ada
   useEffect(() => {
-    let mounted = true;
-
     const init = async () => {
       try {
-        if (!mounted) return;
-
         setLoadStep("Mengecek sesi pengguna...");
 
         const { data: { session } } = await supabase.auth.getSession();
@@ -259,109 +347,59 @@ export const App: React.FC = () => {
             id: session.user.id, 
             email: session.user.email! 
           };
-          
-          if (!mounted) return;
-          
           setUser(userData);
           setUserEmail(session.user.email!);
           localStorage.setItem("user", JSON.stringify(userData));
 
           setLoadStep("Menyiapkan profil...");
           
-          // ✅ OPTIMIZED: Fast profile setup dengan timeout
-          try {
-            const userProfile = await Promise.race([
-              ensureUserProfile(session.user.id, session.user.email!),
-              new Promise<UserProfile>((resolve) => 
-                setTimeout(() => resolve({
-                  gender: "male",
-                  avatar_url: null,
-                  is_online: true
-                }), 3000) // Timeout 3 detik
-              )
-            ]);
-            
-            if (!mounted) return;
-            
-            setCurrentUserGender(userProfile.gender || "male");
-            setCurrentUserAvatar(userProfile.avatar_url || null);
-            setProfileCreated(true);
+          // Ensure profile exists
+          const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+          setCurrentUserGender(userProfile.gender || "male");
+          setCurrentUserAvatar(userProfile.avatar_url || null);
+          setProfileCreated(true);
 
-            setLoadStep("Menyiapkan peta...");
-            
-            // Load initial nearby users
-            const cachedLocation = getCachedLocation();
-            if (cachedLocation) {
-              setLocation(cachedLocation);
-              loadNearbyUsers(session.user.id, cachedLocation);
-            }
-
-            await updateOnlineStatus(session.user.id, true);
-            setLoading(false);
-            
-          } catch (profileError) {
-            console.error("❌ Profile setup error:", profileError);
-            if (!mounted) return;
-            // Fallback: tetap lanjut dengan default profile
-            setCurrentUserGender("male");
-            setCurrentUserAvatar(null);
-            setProfileCreated(true);
-            setLoading(false);
+          setLoadStep("Menyiapkan peta...");
+          
+          // Load initial nearby users
+          const cachedLocation = getCachedLocation();
+          if (cachedLocation) {
+            setLocation(cachedLocation);
+            loadNearbyUsers(session.user.id, cachedLocation);
           }
+
+          await updateOnlineStatus(session.user.id, true);
+          setLoading(false);
+          
         } else {
           // Tidak ada session, tampilkan login screen
           console.log("🔐 No session found");
-          if (mounted) {
-            setLoading(false);
-          }
+          setLoading(false);
         }
       } catch (error) {
         console.error("❌ Initialization error:", error);
-        if (mounted) {
-          setAuthError("Gagal memuat aplikasi. Silakan refresh halaman.");
-          setLoading(false);
-        }
-      }
-    };
-
-    // ✅ Timeout protection: max 8 detik
-    const timeoutId = setTimeout(() => {
-      if (mounted && loading) {
-        console.log("⚠️ Init timeout, forcing app load");
+        setAuthError("Gagal memuat aplikasi. Silakan refresh halaman.");
         setLoading(false);
       }
-    }, 8000);
+    };
 
     init();
-
-    return () => {
-      mounted = false;
-      clearTimeout(timeoutId);
-    };
   }, []);
 
-  // ✅ OPTIMIZED: Smart location tracking dengan cache
+  // ✅ HYBRID: Smart location tracking dengan optimized updates
   const startLocationTracking = useCallback((userId: string) => {
     if (!profileCreated) {
       console.log("⏳ Waiting for profile to be created before starting location tracking...");
       return () => {};
     }
 
-    console.log("🚀 Starting optimized location tracking...");
+    console.log("🚀 Starting hybrid location tracking...");
     
     let lastServerUpdate = 0;
     let lastSavedLocation: [number, number] | null = null;
     let watchId: number;
 
     const updateLocationToServer = async (newLocation: [number, number], reason: string) => {
-      const now = Date.now();
-      
-      // ✅ Cache: Only update server every 2 minutes minimum
-      if (now - lastServerUpdate < 2 * 60 * 1000) {
-        console.log("⏱️  Skipping server update (too recent)");
-        return;
-      }
-
       try {
         await supabase
           .from("profiles")
@@ -373,10 +411,9 @@ export const App: React.FC = () => {
           })
           .eq("id", userId);
         
-        lastServerUpdate = now;
+        lastServerUpdate = Date.now();
         lastSavedLocation = newLocation;
-        setLastLocationUpdate(now);
-        console.log(`📍 Location updated to server (${reason})`);
+        console.log(`📍 Location updated (${reason})`);
       } catch (error) {
         console.error("Location update failed:", error);
       }
@@ -391,19 +428,14 @@ export const App: React.FC = () => {
         lastSavedLocation[0], lastSavedLocation[1],  
         newLocation[0], newLocation[1]
       );
+      if (distance > 0.5) return true;
       
-      // ✅ Only update if moved > 1km or 10 minutes passed
-      if (distance > 1) return true;
-      if (now - lastServerUpdate > 10 * 60 * 1000) return true;
+      if (now - lastServerUpdate > 15 * 60 * 1000) return true;
       
       return false;
     };
 
-    if (!navigator.geolocation) {
-      console.error("❌ Geolocation not supported");
-      return () => {};
-    }
-
+    // Start GPS tracking
     watchId = navigator.geolocation.watchPosition(
       (position) => {
         const newLocation: [number, number] = [
@@ -430,8 +462,8 @@ export const App: React.FC = () => {
       },
       {
         enableHighAccuracy: false,
-        timeout: 15000,
-        maximumAge: 60000 // ✅ Cache location for 1 minute
+        timeout: 10000,
+        maximumAge: 30000
       }
     );
 
@@ -450,26 +482,12 @@ export const App: React.FC = () => {
     }
   }, [user?.id, profileCreated, startLocationTracking]);
 
-  // ✅ OPTIMIZED: Nearby users loading dengan cache dan smart filtering
+  // ✅ HYBRID: Optimized nearby users loading
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
-    if (!userLocation || !profileCreated) {
-      console.log("❌ Cannot load nearby users: No location or profile not created");
-      return;
-    }
-
-    const now = Date.now();
-    
-    // ✅ Cache: Only load users every 30 seconds minimum
-    if (now - lastUsersUpdate < 30 * 1000) {
-      console.log("⏱️  Skipping users load (too recent)");
-      return;
-    }
+    if (!userLocation || !profileCreated) return;
 
     try {
-      console.log("📍 Loading nearby users...");
-      
-      // ✅ OPTIMIZED: Smart query dengan filter yang seimbang
-      const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       
       const { data, error } = await supabase
         .from("profiles")
@@ -482,74 +500,40 @@ export const App: React.FC = () => {
         .eq("is_online", true)
         .not("latitude", "is", null)
         .not("longitude", "is", null)
-        .gte("location_updated_at", fourHoursAgo)
-        .limit(40);
+        .gte("location_updated_at", twoHoursAgo)
+        .limit(25);
 
       if (error) {
-        console.error("❌ Supabase query error:", error);
-        return;
+        console.error("Supabase query error:", error);
+        throw error;
       }
 
-      console.log("📊 Raw users from database:", data?.length || 0);
-
-      if (data && data.length > 0) {
-        // ✅ Calculate distances
+      if (data) {
         const usersWithDistance = data
-          .map(user => {
-            const distance = calculateDistance(
-              userLocation[0], 
-              userLocation[1],
-              user.latitude!, 
-              user.longitude!
-            );
-            return {
-              ...user,
-              distance: distance
-            };
-          })
-          .filter(user => user.distance <= 50) // 50km radius
+          .map(user => ({
+            ...user,
+            distance: calculateDistance(
+              userLocation[0], userLocation[1],
+              user.latitude!, user.longitude!
+            )
+          }))
+          .filter(user => user.distance <= 50)
           .sort((a, b) => a.distance - b.distance)
-          .slice(0, 25);
-
-        console.log(`📍 Found ${usersWithDistance.length} nearby users within 50km`);
-        
-        // ✅ Debug info
-        if (usersWithDistance.length > 0) {
-          usersWithDistance.forEach(user => {
-            console.log(`👤 ${user.username} - ${user.distance.toFixed(2)}km - ${user.is_online ? 'Online' : 'Offline'}`);
-          });
-        }
+          .slice(0, 20);
 
         setNearbyUsers(usersWithDistance);
-        setLastUsersUpdate(now);
-      } else {
-        console.log("❌ No nearby users found");
-        setNearbyUsers([]);
+        console.log(`📍 Loaded ${usersWithDistance.length} nearby users`);
       }
-
     } catch (error) {
-      console.error("❌ Nearby users error:", error);
+      console.error("Nearby users error:", error);
     }
-  }, [profileCreated, lastUsersUpdate]);
+  }, [profileCreated]);
 
-  // ✅ OPTIMIZED: Load nearby users ketika location berubah (dengan debounce)
-  useEffect(() => {
-    if (!user?.id || !profileCreated || !location) return;
-
-    const timer = setTimeout(() => {
-      loadNearbyUsers(user.id, location);
-    }, 2000); // ✅ Debounce 2 detik
-
-    return () => clearTimeout(timer);
-  }, [user?.id, profileCreated, location, loadNearbyUsers]);
-
-  // ✅ OPTIMIZED: Real-time updates untuk nearby users
+  // ✅ Real-time updates untuk nearby users
   useEffect(() => {
     if (!user?.id || !profileCreated) return;
 
     let mounted = true;
-
-    console.log("🔄 Setting up real-time updates for nearby users");
 
     const subscription = supabase
       .channel(`online-status-${user.id}`)
@@ -575,7 +559,7 @@ export const App: React.FC = () => {
     };
   }, [user?.id, profileCreated, location, loadNearbyUsers]);
 
-  // ✅ OPTIMIZED: Auto update online status
+  // ✅ Auto update online status
   useEffect(() => {
     if (!user?.id || !profileCreated) return;
 
@@ -688,22 +672,16 @@ export const App: React.FC = () => {
     } catch (error: any) {
       console.error("❌ Manual login failed:", error);
       
+      // Tampilkan error ke user
       if (error.message?.includes('popup')) {
         setAuthError("Popup login diblokir. Izinkan popup untuk website ini.");
+      } else if (error.message?.includes('configuration')) {
+        setAuthError("Error konfigurasi Google OAuth. Hubungi administrator.");
       } else {
-        setAuthError("Login gagal. Coba lagi.");
+        setAuthError("Login gagal. Coba lagi atau hubungi administrator.");
       }
       
       setIsRedirecting(false);
-    }
-  };
-
-  // ✅ Manual refresh nearby users
-  const handleRefreshUsers = () => {
-    if (user?.id && location) {
-      console.log("🔄 Manually refreshing nearby users...");
-      setLastUsersUpdate(0); // Reset cache
-      loadNearbyUsers(user.id, location);
     }
   };
 
@@ -760,17 +738,14 @@ export const App: React.FC = () => {
 
           {authError && (
             <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded-lg text-red-700 text-sm">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="w-4 h-4" />
-                {authError}
-              </div>
+              {authError}
             </div>
           )}
 
           <button
             onClick={handleManualLogin}
             disabled={isRedirecting}
-            className="px-8 py-3 bg-blue-500 text-white rounded-lg shadow hover:bg-blue-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mx-auto w-full mb-3"
+            className="px-8 py-3 bg-blue-500 text-white rounded-lg shadow hover:bg-blue-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mx-auto w-full"
           >
             {isRedirecting ? (
               <>
@@ -814,16 +789,6 @@ export const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Refresh Button */}
-          <button
-            onClick={handleRefreshUsers}
-            className="bg-white p-2 rounded-xl shadow-md hover:bg-green-50 transition-all duration-200"
-            aria-label="Refresh users"
-            title="Refresh Nearby Users"
-          >
-            <RefreshCw className="w-5 h-5 text-gray-700" />
-          </button>
-
           {/* User info */}
           <div className="hidden md:flex items-center gap-2 text-gray-600">
             <User className="w-4 h-4" />
@@ -858,9 +823,9 @@ export const App: React.FC = () => {
         />
       </div>
 
-      {/* MAIN CONTENT */}
+      {/* MAIN CONTENT - FIXED: Sidebar tidak terhalang header */}
       <div className="flex flex-1 relative overflow-hidden">
-        {/* SIDEBAR */}
+        {/* SIDEBAR - FIXED: Padding top untuk header dan overflow */}
         <div className={`
           fixed md:relative
           top-0 left-0 h-full
@@ -869,8 +834,8 @@ export const App: React.FC = () => {
           bg-white/95 backdrop-blur-md border-r border-gray-200
           shadow-xl md:shadow-none
           w-80 z-50
-          pt-16
-          overflow-y-auto
+          pt-16 /* FIXED: Padding top untuk header */
+          overflow-y-auto /* FIXED: Biar bisa scroll */
         `}>
           {showSidebar && (
             <SidebarUser
@@ -909,3 +874,4 @@ export const App: React.FC = () => {
 };
 
 export default App;
+
