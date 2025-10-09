@@ -26,11 +26,7 @@ const signInWithGoogle = async () => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: window.location.origin,
-        queryParams: {
-          access_type: 'offline',
-          prompt: 'consent',
-        }
+        redirectTo: window.location.origin
       }
     });
     
@@ -47,22 +43,27 @@ const signInWithGoogle = async () => {
   }
 };
 
-// ✅ AUTO CREATE PROFILE setelah login Google
+// ✅ FIXED: Auto create profile dengan error handling yang better
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
-    console.log("🆕 Creating new user profile...");
+    console.log("🆕 Creating new user profile for:", userId);
     
     const newProfile = {
       id: userId,
       username: email.split('@')[0],
       email: email,
-      gender: "male" as const,
+      gender: "male",
       avatar_url: null,
       is_online: true,
       last_online: new Date().toISOString(),
       created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
+      latitude: null,
+      longitude: null,
+      location_updated_at: new Date().toISOString()
     };
+
+    console.log("📝 Profile data to insert:", newProfile);
 
     const { data, error } = await supabase
       .from("profiles")
@@ -71,29 +72,37 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
       .single();
 
     if (error) {
-      console.error("Error creating profile:", error);
+      console.error("❌ Error creating profile:", error);
       
-      // Jika error karena profile sudah ada, coba ambil data yang sudah ada
-      if (error.code === '23505') { // Unique violation
-        console.log("🔄 Profile already exists, fetching existing data...");
-        const { data: existingData } = await supabase
-          .from("profiles")
-          .select("gender, avatar_url, latitude, longitude, is_online")
-          .eq("id", userId)
-          .single();
-        
-        if (existingData) {
-          return existingData;
-        }
+      // Coba lagi tanpa field yang mungkin bermasalah
+      const fallbackProfile = {
+        id: userId,
+        username: email.split('@')[0],
+        gender: "male",
+        is_online: true,
+        last_online: new Date().toISOString()
+      };
+
+      const { data: fallbackData, error: fallbackError } = await supabase
+        .from("profiles")
+        .insert(fallbackProfile)
+        .select("gender, avatar_url, latitude, longitude, is_online")
+        .single();
+
+      if (fallbackError) {
+        console.error("❌ Fallback profile creation also failed:", fallbackError);
+        throw fallbackError;
       }
-      throw error;
+
+      console.log("✅ Fallback profile created successfully");
+      return fallbackData!;
     }
 
     console.log("✅ New profile created successfully");
     return data!;
 
   } catch (error) {
-    console.error("Create profile error:", error);
+    console.error("❌ Create profile error:", error);
     // Return default profile sebagai fallback
     return {
       gender: "male",
@@ -103,9 +112,11 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
   }
 };
 
-// ✅ Cek dan ensure user profile
+// ✅ FIXED: Cek dan ensure user profile dengan retry logic
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
+    console.log("🔍 Checking if profile exists for:", userId);
+    
     // Cek apakah profile sudah ada
     const { data: existingProfile, error } = await supabase
       .from("profiles")
@@ -113,9 +124,11 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
       .eq("id", userId)
       .maybeSingle();
 
-    if (error && error.code !== 'PGRST116') {
+    if (error) {
       console.error("Error checking profile:", error);
     }
+
+    console.log("📊 Existing profile check result:", existingProfile);
 
     // Jika profile sudah ada, return
     if (existingProfile) {
@@ -124,10 +137,11 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
     }
 
     // Jika belum ada, buat profile baru
+    console.log("🆕 Profile not found, creating new one...");
     return await createUserProfile(userId, email);
 
   } catch (error) {
-    console.error("Ensure profile error:", error);
+    console.error("❌ Ensure profile error:", error);
     return {
       gender: "male",
       avatar_url: null,
@@ -162,7 +176,7 @@ const handleLogout = async (userId: string) => {
     localStorage.removeItem("userLocation");
     localStorage.removeItem("userLocationTime");
 
-    console.log("✅ Logout successful, user data will be deleted via CASCADE");
+    console.log("✅ Logout successful");
     
     // 4. Redirect ke halaman login
     window.location.reload();
@@ -186,9 +200,126 @@ export const App: React.FC = () => {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const [userEmail, setUserEmail] = useState<string>("");
+  const [profileCreated, setProfileCreated] = useState(false);
+
+  // ✅ FIXED: Auth state listener untuk handle login success
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log(`🔄 Auth state changed: ${event}`, session);
+      
+      if (event === 'SIGNED_IN' && session) {
+        console.log("✅ User signed in, setting up profile...");
+        
+        const userData = { 
+          id: session.user.id, 
+          email: session.user.email! 
+        };
+        
+        setUser(userData);
+        setUserEmail(session.user.email!);
+        localStorage.setItem("user", JSON.stringify(userData));
+
+        setLoadStep("Membuat profil...");
+        
+        // Auto create profile dengan delay untuk memastikan session sudah ready
+        setTimeout(async () => {
+          try {
+            const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+            setCurrentUserGender(userProfile.gender || "male");
+            setCurrentUserAvatar(userProfile.avatar_url || null);
+            setProfileCreated(true);
+            
+            console.log("✅ Profile setup completed");
+            
+            // Set online status
+            await updateOnlineStatus(session.user.id, true);
+            
+            setLoading(false);
+            setIsRedirecting(false);
+          } catch (error) {
+            console.error("❌ Profile setup failed:", error);
+            setLoading(false);
+            setIsRedirecting(false);
+          }
+        }, 1000);
+      }
+      else if (event === 'SIGNED_OUT') {
+        console.log("🚪 User signed out");
+        setUser(null);
+        setUserEmail("");
+        localStorage.removeItem("user");
+        setProfileCreated(false);
+        setLoading(false);
+      }
+      else if (event === 'INITIAL_SESSION') {
+        console.log("🔧 Initial session loaded");
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ✅ Initialize app - cek session yang ada
+  useEffect(() => {
+    const init = async () => {
+      try {
+        setLoadStep("Mengecek sesi pengguna...");
+
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (session?.user) {
+          console.log("✅ Existing session found:", session.user.id);
+          const userData = { 
+            id: session.user.id, 
+            email: session.user.email! 
+          };
+          setUser(userData);
+          setUserEmail(session.user.email!);
+          localStorage.setItem("user", JSON.stringify(userData));
+
+          setLoadStep("Menyiapkan profil...");
+          
+          // Ensure profile exists
+          const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+          setCurrentUserGender(userProfile.gender || "male");
+          setCurrentUserAvatar(userProfile.avatar_url || null);
+          setProfileCreated(true);
+
+          setLoadStep("Menyiapkan peta...");
+          
+          // Load initial nearby users
+          const cachedLocation = getCachedLocation();
+          if (cachedLocation) {
+            setLocation(cachedLocation);
+            loadNearbyUsers(session.user.id, cachedLocation);
+          }
+
+          await updateOnlineStatus(session.user.id, true);
+          setLoading(false);
+          
+        } else {
+          // Tidak ada session, tampilkan login screen
+          console.log("🔐 No session found");
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("❌ Initialization error:", error);
+        setLoading(false);
+      }
+    };
+
+    init();
+  }, []);
 
   // ✅ HYBRID: Smart location tracking dengan optimized updates
   const startLocationTracking = useCallback((userId: string) => {
+    if (!profileCreated) {
+      console.log("⏳ Waiting for profile to be created before starting location tracking...");
+      return () => {};
+    }
+
     console.log("🚀 Starting hybrid location tracking...");
     
     let lastServerUpdate = 0;
@@ -268,11 +399,19 @@ export const App: React.FC = () => {
         navigator.geolocation.clearWatch(watchId);
       }
     };
-  }, []);
+  }, [profileCreated]);
+
+  // ✅ Start location tracking setelah profile dibuat
+  useEffect(() => {
+    if (user?.id && profileCreated) {
+      const cleanup = startLocationTracking(user.id);
+      return cleanup;
+    }
+  }, [user?.id, profileCreated, startLocationTracking]);
 
   // ✅ HYBRID: Optimized nearby users loading
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
-    if (!userLocation) return;
+    if (!userLocation || !profileCreated) return;
 
     try {
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
@@ -314,139 +453,12 @@ export const App: React.FC = () => {
       }
     } catch (error) {
       console.error("Nearby users error:", error);
-      
-      try {
-        console.log("🔄 Trying fallback query without location timestamp...");
-        const { data } = await supabase
-          .from("profiles")
-          .select(`
-            id, username, avatar_url, age, bio, interests, 
-            location, is_online, last_online, latitude, longitude, gender
-          `)
-          .neq("id", currentUserId)
-          .eq("is_online", true)
-          .not("latitude", "is", null)
-          .not("longitude", "is", null)
-          .limit(20);
-
-        if (data) {
-          const usersWithDistance = data
-            .map(user => ({
-              ...user,
-              distance: calculateDistance(
-                userLocation[0], userLocation[1],
-                user.latitude!, user.longitude!
-              )
-            }))
-            .filter(user => user.distance <= 50)
-            .sort((a, b) => a.distance - b.distance);
-
-          setNearbyUsers(usersWithDistance);
-          console.log(`📍 Fallback loaded ${usersWithDistance.length} users`);
-        }
-      } catch (fallbackError) {
-        console.error("Fallback query also failed:", fallbackError);
-      }
     }
-  }, []);
-
-  // ✅ Real-time auth state listener
-  useEffect(() => {
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log(`🔄 Auth state changed: ${event}`, session);
-      
-      if (event === 'SIGNED_IN' && session) {
-        // User berhasil login, buat profile dan load data
-        const userData = { 
-          id: session.user.id, 
-          email: session.user.email! 
-        };
-        setUser(userData);
-        setUserEmail(session.user.email!);
-        localStorage.setItem("user", JSON.stringify(userData));
-
-        // Auto create profile
-        const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
-        setCurrentUserGender(userProfile.gender || "male");
-        setCurrentUserAvatar(userProfile.avatar_url || null);
-
-        // Start location tracking
-        startLocationTracking(session.user.id);
-        
-        setLoading(false);
-        setIsRedirecting(false);
-      }
-      else if (event === 'SIGNED_OUT') {
-        // User logout, reset state
-        setUser(null);
-        setUserEmail("");
-        localStorage.removeItem("user");
-        setLoading(false);
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, [startLocationTracking]);
-
-  // ✅ Initialize app - cek session yang ada
-  useEffect(() => {
-    const init = async () => {
-      try {
-        setLoadStep("Mengecek sesi pengguna...");
-
-        const { data: { session } } = await supabase.auth.getSession();
-        
-        if (session?.user) {
-          console.log("✅ Existing session found");
-          const userData = { 
-            id: session.user.id, 
-            email: session.user.email! 
-          };
-          setUser(userData);
-          setUserEmail(session.user.email!);
-          localStorage.setItem("user", JSON.stringify(userData));
-
-          setLoadStep("Menyiapkan profil...");
-          
-          // Ensure profile exists
-          const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
-          setCurrentUserGender(userProfile.gender || "male");
-          setCurrentUserAvatar(userProfile.avatar_url || null);
-
-          setLoadStep("Menyiapkan peta...");
-          
-          // Start location tracking
-          startLocationTracking(session.user.id);
-          
-          // Load initial nearby users
-          const cachedLocation = getCachedLocation();
-          if (cachedLocation) {
-            setLocation(cachedLocation);
-            loadNearbyUsers(session.user.id, cachedLocation);
-          }
-
-          await updateOnlineStatus(session.user.id, true);
-          setLoading(false);
-          
-        } else {
-          // Tidak ada session, tampilkan login screen
-          console.log("🔐 No session found");
-          setLoading(false);
-        }
-      } catch (error) {
-        console.error("Initialization error:", error);
-        setLoading(false);
-      }
-    };
-
-    init();
-  }, [startLocationTracking, loadNearbyUsers]);
+  }, [profileCreated]);
 
   // ✅ Real-time updates untuk nearby users
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id || !profileCreated) return;
 
     let mounted = true;
 
@@ -455,15 +467,14 @@ export const App: React.FC = () => {
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*',
           schema: 'public',
-          table: 'profiles',
-          filter: 'is_online=eq.true'
+          table: 'profiles'
         },
         (payload) => {
-          if (mounted) {
-            console.log('🔄 Real-time status update, refreshing nearby users...');
-            setRefreshTrigger(prev => prev + 1);
+          if (mounted && location) {
+            console.log('🔄 Real-time update, refreshing nearby users...');
+            loadNearbyUsers(user.id, location);
           }
         }
       )
@@ -473,19 +484,11 @@ export const App: React.FC = () => {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, [user?.id]);
-
-  // ✅ Refresh nearby users
-  useEffect(() => {
-    if (refreshTrigger > 0 && user?.id && location) {
-      console.log('🔄 Refreshing nearby users due to real-time update');
-      loadNearbyUsers(user.id, location);
-    }
-  }, [refreshTrigger, user?.id, location, loadNearbyUsers]);
+  }, [user?.id, profileCreated, location, loadNearbyUsers]);
 
   // ✅ Auto update online status
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id || !profileCreated) return;
 
     let mounted = true;
 
@@ -500,12 +503,8 @@ export const App: React.FC = () => {
     return () => {
       mounted = false;
       clearInterval(interval);
-      // Cleanup on unmount
-      if (user.id) {
-        updateOnlineStatus(user.id, false);
-      }
     };
-  }, [user?.id]);
+  }, [user?.id, profileCreated]);
 
   // ✅ HELPER FUNCTIONS
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
@@ -568,6 +567,8 @@ export const App: React.FC = () => {
   };
 
   const updateOnlineStatus = async (userId: string, isOnline: boolean) => {
+    if (!profileCreated) return;
+    
     try {
       await supabase
         .from("profiles")
@@ -716,21 +717,32 @@ export const App: React.FC = () => {
         />
       </div>
 
-      {/* MAIN CONTENT */}
+      {/* MAIN CONTENT - FIXED LAYOUT */}
       <div className="flex flex-1 relative overflow-hidden">
-        {/* SIDEBAR */}
-        {showSidebar && (
-          <SidebarUser
-            userId={user.id}
-            isOpen={showSidebar}
-            onClose={() => setShowSidebar(false)}
-          />
-        )}
+        {/* SIDEBAR - FIXED: Pastikan sidebar di atas peta */}
+        <div className={`
+          fixed md:relative
+          top-0 left-0 h-full
+          transform transition-transform duration-300 z-40
+          ${showSidebar ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0'}
+          bg-white/90 backdrop-blur-md border-r border-gray-200
+          shadow-lg md:shadow-none
+        `}>
+          {showSidebar && (
+            <SidebarUser
+              userId={user.id}
+              isOpen={showSidebar}
+              onClose={() => setShowSidebar(false)}
+            />
+          )}
+        </div>
 
-        {/* MAP */}
-        <div className={`transition-all duration-300 ${
-          showSidebar ? "md:ml-0" : "ml-0"
-        } flex-1 relative`}>
+        {/* MAP - FIXED: Adjust width berdasarkan sidebar state */}
+        <div className={`
+          flex-1 transition-all duration-300 relative z-10
+          ${showSidebar ? 'md:ml-80' : 'ml-0'}
+          w-full h-full
+        `}>
           <Map
             currentUserId={user.id}
             currentUserGender={currentUserGender}
@@ -741,10 +753,10 @@ export const App: React.FC = () => {
         </div>
       </div>
 
-      {/* MOBILE OVERLAY */}
+      {/* MOBILE OVERLAY - FIXED: Tutup sidebar ketika klik overlay */}
       {showSidebar && (
         <div
-          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-20 md:hidden"
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-30 md:hidden"
           onClick={() => setShowSidebar(false)}
         />
       )}
