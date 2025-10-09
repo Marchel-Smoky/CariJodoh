@@ -26,33 +26,40 @@ const signInWithGoogle = async () => {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: window.location.origin
+        redirectTo: window.location.origin,
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'consent',
+        }
       }
     });
     
     if (error) {
-      console.error("Login error:", error.message);
+      console.error("❌ Login error:", error.message);
       throw error;
     }
     
     console.log("✅ Google OAuth initiated successfully");
     return data;
   } catch (error) {
-    console.error("Google sign in failed:", error);
+    console.error("❌ Google sign in failed:", error);
     throw error;
   }
 };
 
-// ✅ FIXED: Auto create profile dengan error handling yang better
+// ✅ FIXED: Better auto create profile dengan validasi gender dan error handling
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🆕 Creating new user profile for:", userId);
+    
+    // Pastikan gender valid sesuai constraint database
+    const validGender = "male"; // Default value yang sesuai dengan constraint
     
     const newProfile = {
       id: userId,
       username: email.split('@')[0],
       email: email,
-      gender: "male",
+      gender: validGender, // PASTIKAN ini 'male' atau 'female'
       avatar_url: null,
       is_online: true,
       last_online: new Date().toISOString(),
@@ -74,8 +81,44 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
     if (error) {
       console.error("❌ Error creating profile:", error);
       
-      // Coba lagi tanpa field yang mungkin bermasalah
-      const fallbackProfile = {
+      // Detailed error handling
+      if (error.code === '23505') { // Unique violation - profile sudah ada
+        console.log("🔄 Profile already exists, fetching existing...");
+        const { data: existingData } = await supabase
+          .from("profiles")
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .eq("id", userId)
+          .single();
+        
+        if (existingData) {
+          console.log("✅ Using existing profile");
+          return existingData;
+        }
+      }
+      
+      if (error.code === '23514') { // Check constraint violation (gender)
+        console.error("❌ Gender constraint violation, retrying with valid gender...");
+        // Coba dengan gender yang valid
+        const fallbackProfile = {
+          ...newProfile,
+          gender: "male" // Force valid gender
+        };
+        
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from("profiles")
+          .insert(fallbackProfile)
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .single();
+
+        if (!fallbackError && fallbackData) {
+          console.log("✅ Profile created with fixed gender");
+          return fallbackData;
+        }
+      }
+      
+      // Coba minimal profile creation
+      console.log("🔄 Trying minimal profile creation...");
+      const minimalProfile = {
         id: userId,
         username: email.split('@')[0],
         gender: "male",
@@ -83,19 +126,18 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
         last_online: new Date().toISOString()
       };
 
-      const { data: fallbackData, error: fallbackError } = await supabase
+      const { data: minimalData, error: minimalError } = await supabase
         .from("profiles")
-        .insert(fallbackProfile)
+        .insert(minimalProfile)
         .select("gender, avatar_url, latitude, longitude, is_online")
         .single();
 
-      if (fallbackError) {
-        console.error("❌ Fallback profile creation also failed:", fallbackError);
-        throw fallbackError;
+      if (!minimalError && minimalData) {
+        console.log("✅ Minimal profile created successfully");
+        return minimalData;
       }
-
-      console.log("✅ Fallback profile created successfully");
-      return fallbackData!;
+      
+      throw error;
     }
 
     console.log("✅ New profile created successfully");
@@ -103,9 +145,9 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
 
   } catch (error) {
     console.error("❌ Create profile error:", error);
-    // Return default profile sebagai fallback
+    // Return default profile dengan gender yang valid
     return {
-      gender: "male",
+      gender: "male", // PASTIKAN valid
       avatar_url: null,
       is_online: true
     };
@@ -124,7 +166,7 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
       .eq("id", userId)
       .maybeSingle();
 
-    if (error) {
+    if (error && error.code !== 'PGRST116') {
       console.error("Error checking profile:", error);
     }
 
@@ -201,60 +243,90 @@ export const App: React.FC = () => {
   const [isRedirecting, setIsRedirecting] = useState(false);
   const [userEmail, setUserEmail] = useState<string>("");
   const [profileCreated, setProfileCreated] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // ✅ FIXED: Auth state listener untuk handle login success
+  // ✅ FIXED: Better auth state listener dengan error handling
   useEffect(() => {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log(`🔄 Auth state changed: ${event}`, session);
       
-      if (event === 'SIGNED_IN' && session) {
-        console.log("✅ User signed in, setting up profile...");
-        
-        const userData = { 
-          id: session.user.id, 
-          email: session.user.email! 
-        };
-        
-        setUser(userData);
-        setUserEmail(session.user.email!);
-        localStorage.setItem("user", JSON.stringify(userData));
+      try {
+        if (event === 'SIGNED_IN' && session) {
+          console.log("✅ User signed in, setting up profile...");
+          setAuthError(null);
+          
+          const userData = { 
+            id: session.user.id, 
+            email: session.user.email! 
+          };
+          
+          setUser(userData);
+          setUserEmail(session.user.email!);
+          localStorage.setItem("user", JSON.stringify(userData));
 
-        setLoadStep("Membuat profil...");
-        
-        // Auto create profile dengan delay untuk memastikan session sudah ready
-        setTimeout(async () => {
-          try {
-            const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
-            setCurrentUserGender(userProfile.gender || "male");
-            setCurrentUserAvatar(userProfile.avatar_url || null);
-            setProfileCreated(true);
-            
-            console.log("✅ Profile setup completed");
-            
-            // Set online status
-            await updateOnlineStatus(session.user.id, true);
-            
-            setLoading(false);
-            setIsRedirecting(false);
-          } catch (error) {
-            console.error("❌ Profile setup failed:", error);
-            setLoading(false);
-            setIsRedirecting(false);
-          }
-        }, 1000);
-      }
-      else if (event === 'SIGNED_OUT') {
-        console.log("🚪 User signed out");
-        setUser(null);
-        setUserEmail("");
-        localStorage.removeItem("user");
-        setProfileCreated(false);
+          setLoadStep("Membuat profil...");
+          
+          // Auto create profile dengan retry mechanism
+          let retryCount = 0;
+          const maxRetries = 3;
+          
+          const createProfileWithRetry = async () => {
+            try {
+              const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+              setCurrentUserGender(userProfile.gender || "male");
+              setCurrentUserAvatar(userProfile.avatar_url || null);
+              setProfileCreated(true);
+              
+              console.log("✅ Profile setup completed");
+              
+              // Set online status
+              await updateOnlineStatus(session.user.id, true);
+              
+              setLoading(false);
+              setIsRedirecting(false);
+            } catch (error) {
+              console.error(`❌ Profile setup failed (attempt ${retryCount + 1}/${maxRetries}):`, error);
+              
+              if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`🔄 Retrying profile creation... (${retryCount}/${maxRetries})`);
+                setTimeout(createProfileWithRetry, 1000 * retryCount);
+              } else {
+                console.error("❌ Max retries reached");
+                setAuthError("Gagal membuat profil pengguna. Silakan coba lagi.");
+                setLoading(false);
+                setIsRedirecting(false);
+              }
+            }
+          };
+          
+          createProfileWithRetry();
+        }
+        else if (event === 'SIGNED_OUT') {
+          console.log("🚪 User signed out");
+          setUser(null);
+          setUserEmail("");
+          setAuthError(null);
+          localStorage.removeItem("user");
+          setProfileCreated(false);
+          setLoading(false);
+        }
+        else if (event === 'USER_UPDATED') {
+          console.log("👤 User updated");
+        }
+        else if (event === 'TOKEN_REFRESHED') {
+          console.log("🔄 Token refreshed");
+        }
+        else if (event === 'INITIAL_SESSION') {
+          console.log("🔧 Initial session loaded");
+        }
+      } catch (error) {
+        console.error("❌ Auth state change error:", error);
+        setAuthError("Terjadi kesalahan saat memproses login.");
         setLoading(false);
-      }
-      else if (event === 'INITIAL_SESSION') {
-        console.log("🔧 Initial session loaded");
+        setIsRedirecting(false);
       }
     });
 
@@ -306,6 +378,7 @@ export const App: React.FC = () => {
         }
       } catch (error) {
         console.error("❌ Initialization error:", error);
+        setAuthError("Gagal memuat aplikasi. Silakan refresh halaman.");
         setLoading(false);
       }
     };
@@ -582,14 +655,32 @@ export const App: React.FC = () => {
     }
   };
 
-  // ✅ Manual login handler
+  // ✅ Manual login handler dengan better error reporting
   const handleManualLogin = async () => {
     setIsRedirecting(true);
+    setAuthError(null);
     setLoadStep("Mengarahkan ke Google...");
     try {
-      await signInWithGoogle();
-    } catch (error) {
-      console.error("Manual login failed:", error);
+      console.log("🔐 Attempting Google login...");
+      const result = await signInWithGoogle();
+      
+      if (!result) {
+        throw new Error("Google login returned no result");
+      }
+      
+      console.log("✅ Google login initiated successfully");
+    } catch (error: any) {
+      console.error("❌ Manual login failed:", error);
+      
+      // Tampilkan error ke user
+      if (error.message?.includes('popup')) {
+        setAuthError("Popup login diblokir. Izinkan popup untuk website ini.");
+      } else if (error.message?.includes('configuration')) {
+        setAuthError("Error konfigurasi Google OAuth. Hubungi administrator.");
+      } else {
+        setAuthError("Login gagal. Coba lagi atau hubungi administrator.");
+      }
+      
       setIsRedirecting(false);
     }
   };
@@ -645,6 +736,12 @@ export const App: React.FC = () => {
           <h2 className="text-2xl font-bold text-gray-800 mb-3">Jomblo Locator</h2>
           <p className="text-gray-600 mb-6">Temukan teman sekitar Anda</p>
 
+          {authError && (
+            <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded-lg text-red-700 text-sm">
+              {authError}
+            </div>
+          )}
+
           <button
             onClick={handleManualLogin}
             disabled={isRedirecting}
@@ -662,6 +759,10 @@ export const App: React.FC = () => {
               </>
             )}
           </button>
+
+          <p className="text-sm text-gray-500 mt-4">
+            Jika ada masalah, pastikan popup diizinkan dan coba refresh halaman
+          </p>
         </div>
       </div>
     );
