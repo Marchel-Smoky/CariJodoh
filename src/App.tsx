@@ -3,7 +3,7 @@ import { supabase } from "./lib/supabase";
 import { Map } from "./components/Map";
 import { SidebarUser } from "./components/SidebarUser";
 import { HorizontalUserScroll } from "./components/UserList";
-import { Loader2, MapPin, Wifi, Menu } from "lucide-react";
+import { Loader2, MapPin, Wifi, Menu, LogOut, User } from "lucide-react";
 import "./index.css";
 
 type User = {
@@ -19,6 +19,161 @@ type UserProfile = {
   is_online?: boolean | null;
 };
 
+// ✅ Fungsi login dengan Google
+const signInWithGoogle = async () => {
+  try {
+    console.log("🔐 Starting Google OAuth...");
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin,
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'consent',
+        }
+      }
+    });
+    
+    if (error) {
+      console.error("Login error:", error.message);
+      throw error;
+    }
+    
+    console.log("✅ Google OAuth initiated successfully");
+    return data;
+  } catch (error) {
+    console.error("Google sign in failed:", error);
+    throw error;
+  }
+};
+
+// ✅ AUTO CREATE PROFILE setelah login Google
+const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
+  try {
+    console.log("🆕 Creating new user profile...");
+    
+    const newProfile = {
+      id: userId,
+      username: email.split('@')[0],
+      email: email,
+      gender: "male" as const,
+      avatar_url: null,
+      is_online: true,
+      last_online: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .insert(newProfile)
+      .select("gender, avatar_url, latitude, longitude, is_online")
+      .single();
+
+    if (error) {
+      console.error("Error creating profile:", error);
+      
+      // Jika error karena profile sudah ada, coba ambil data yang sudah ada
+      if (error.code === '23505') { // Unique violation
+        console.log("🔄 Profile already exists, fetching existing data...");
+        const { data: existingData } = await supabase
+          .from("profiles")
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .eq("id", userId)
+          .single();
+        
+        if (existingData) {
+          return existingData;
+        }
+      }
+      throw error;
+    }
+
+    console.log("✅ New profile created successfully");
+    return data!;
+
+  } catch (error) {
+    console.error("Create profile error:", error);
+    // Return default profile sebagai fallback
+    return {
+      gender: "male",
+      avatar_url: null,
+      is_online: true
+    };
+  }
+};
+
+// ✅ Cek dan ensure user profile
+const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
+  try {
+    // Cek apakah profile sudah ada
+    const { data: existingProfile, error } = await supabase
+      .from("profiles")
+      .select("gender, avatar_url, latitude, longitude, is_online")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error("Error checking profile:", error);
+    }
+
+    // Jika profile sudah ada, return
+    if (existingProfile) {
+      console.log("✅ Profile already exists");
+      return existingProfile;
+    }
+
+    // Jika belum ada, buat profile baru
+    return await createUserProfile(userId, email);
+
+  } catch (error) {
+    console.error("Ensure profile error:", error);
+    return {
+      gender: "male",
+      avatar_url: null,
+      is_online: true
+    };
+  }
+};
+
+// ✅ LOGOUT dengan delete data user
+const handleLogout = async (userId: string) => {
+  try {
+    console.log("🚪 Logging out and cleaning up user data...");
+    
+    // 1. Update status online menjadi false
+    await supabase
+      .from("profiles")
+      .update({
+        is_online: false,
+        last_online: new Date().toISOString()
+      })
+      .eq("id", userId);
+
+    // 2. Sign out dari auth (ini akan trigger ON DELETE CASCADE di database)
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error("Sign out error:", error);
+      throw error;
+    }
+
+    // 3. Clear local storage
+    localStorage.removeItem("user");
+    localStorage.removeItem("userLocation");
+    localStorage.removeItem("userLocationTime");
+
+    console.log("✅ Logout successful, user data will be deleted via CASCADE");
+    
+    // 4. Redirect ke halaman login
+    window.location.reload();
+    
+  } catch (error) {
+    console.error("Logout error:", error);
+    // Force reload anyway
+    window.location.reload();
+  }
+};
+
 export const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [currentUserGender, setCurrentUserGender] = useState<"male" | "female">("male");
@@ -29,6 +184,8 @@ export const App: React.FC = () => {
   const [showSidebar, setShowSidebar] = useState(false);
   const [nearbyUsers, setNearbyUsers] = useState<any[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [isRedirecting, setIsRedirecting] = useState(false);
+  const [userEmail, setUserEmail] = useState<string>("");
 
   // ✅ HYBRID: Smart location tracking dengan optimized updates
   const startLocationTracking = useCallback((userId: string) => {
@@ -59,21 +216,16 @@ export const App: React.FC = () => {
     };
 
     const shouldUpdateToServer = (newLocation: [number, number]): boolean => {
-  const now = Date.now();
-  
-  // 1. First time update
+      const now = Date.now();
+      
       if (!lastSavedLocation) return true;
       
-      // 2. Significant movement (> 500 meters)
       const distance = calculateDistance(
-        lastSavedLocation[0],  // lat1
-        lastSavedLocation[1],  // lon1  
-        newLocation[0],        // lat2
-        newLocation[1]         // lon2
+        lastSavedLocation[0], lastSavedLocation[1],  
+        newLocation[0], newLocation[1]
       );
       if (distance > 0.5) return true;
       
-      // 3. Periodic update (every 15 minutes)
       if (now - lastServerUpdate > 15 * 60 * 1000) return true;
       
       return false;
@@ -87,18 +239,15 @@ export const App: React.FC = () => {
           position.coords.longitude
         ];
 
-        // ✅ Always update UI immediately (client-side)
         setLocation(newLocation);
         cacheLocation(newLocation);
 
-        // ✅ Smart server update (hybrid approach)
         if (shouldUpdateToServer(newLocation)) {
           updateLocationToServer(newLocation, "movement/periodic");
         }
       },
       (error) => {
         console.error("Location tracking error:", error);
-        // Fallback to IP-based location
         getCityLevelLocation().then(fallbackLocation => {
           if (fallbackLocation) {
             setLocation(fallbackLocation);
@@ -108,9 +257,9 @@ export const App: React.FC = () => {
         });
       },
       {
-        enableHighAccuracy: false, // Balance accuracy vs battery
+        enableHighAccuracy: false,
         timeout: 10000,
-        maximumAge: 30000 // 30 second cache
+        maximumAge: 30000
       }
     );
 
@@ -121,69 +270,31 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // ✅ HYBRID: Optimized nearby users loading dengan real-time updates
-  // ✅ Load nearby users - FIXED URL encoding
-const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
-  if (!userLocation) return;
+  // ✅ HYBRID: Optimized nearby users loading
+  const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
+    if (!userLocation) return;
 
-  try {
-    // ✅ FIX: Calculate timestamp properly tanpa URL encoding issues
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    
-    // ✅ FIX: Gunakan query builder Supabase dengan benar
-    const { data, error } = await supabase
-      .from("profiles")
-      .select(`
-        id, username, avatar_url, age, bio, interests, 
-        location, is_online, last_online, latitude, longitude, gender,
-        location_updated_at
-      `)
-      .neq("id", currentUserId)
-      .eq("is_online", true)
-      .not("latitude", "is", null)
-      .not("longitude", "is", null)
-      .gte("location_updated_at", twoHoursAgo) // ✅ Fixed timestamp format
-      .limit(25);
-
-    if (error) {
-      console.error("Supabase query error:", error);
-      throw error;
-    }
-
-    if (data) {
-      // ✅ Client-side filtering untuk akurasi
-      const usersWithDistance = data
-        .map(user => ({
-          ...user,
-          distance: calculateDistance(
-            userLocation[0], userLocation[1],
-            user.latitude!, user.longitude!
-          )
-        }))
-        .filter(user => user.distance <= 50)
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, 20);
-
-      setNearbyUsers(usersWithDistance);
-      console.log(`📍 Loaded ${usersWithDistance.length} nearby users`);
-    }
-  } catch (error) {
-    console.error("Nearby users error:", error);
-    
-    // Fallback: load without location_updated_at filter
     try {
-      console.log("🔄 Trying fallback query without location timestamp...");
-      const { data } = await supabase
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      
+      const { data, error } = await supabase
         .from("profiles")
         .select(`
           id, username, avatar_url, age, bio, interests, 
-          location, is_online, last_online, latitude, longitude, gender
+          location, is_online, last_online, latitude, longitude, gender,
+          location_updated_at
         `)
         .neq("id", currentUserId)
         .eq("is_online", true)
         .not("latitude", "is", null)
         .not("longitude", "is", null)
-        .limit(20);
+        .gte("location_updated_at", twoHoursAgo)
+        .limit(25);
+
+      if (error) {
+        console.error("Supabase query error:", error);
+        throw error;
+      }
 
       if (data) {
         const usersWithDistance = data
@@ -195,18 +306,145 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
             )
           }))
           .filter(user => user.distance <= 50)
-          .sort((a, b) => a.distance - b.distance);
+          .sort((a, b) => a.distance - b.distance)
+          .slice(0, 20);
 
         setNearbyUsers(usersWithDistance);
-        console.log(`📍 Fallback loaded ${usersWithDistance.length} users`);
+        console.log(`📍 Loaded ${usersWithDistance.length} nearby users`);
       }
-    } catch (fallbackError) {
-      console.error("Fallback query also failed:", fallbackError);
-    }
-  }
-}, []);
+    } catch (error) {
+      console.error("Nearby users error:", error);
+      
+      try {
+        console.log("🔄 Trying fallback query without location timestamp...");
+        const { data } = await supabase
+          .from("profiles")
+          .select(`
+            id, username, avatar_url, age, bio, interests, 
+            location, is_online, last_online, latitude, longitude, gender
+          `)
+          .neq("id", currentUserId)
+          .eq("is_online", true)
+          .not("latitude", "is", null)
+          .not("longitude", "is", null)
+          .limit(20);
 
-  // ✅ HYBRID: Real-time status updates only (ringan)
+        if (data) {
+          const usersWithDistance = data
+            .map(user => ({
+              ...user,
+              distance: calculateDistance(
+                userLocation[0], userLocation[1],
+                user.latitude!, user.longitude!
+              )
+            }))
+            .filter(user => user.distance <= 50)
+            .sort((a, b) => a.distance - b.distance);
+
+          setNearbyUsers(usersWithDistance);
+          console.log(`📍 Fallback loaded ${usersWithDistance.length} users`);
+        }
+      } catch (fallbackError) {
+        console.error("Fallback query also failed:", fallbackError);
+      }
+    }
+  }, []);
+
+  // ✅ Real-time auth state listener
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log(`🔄 Auth state changed: ${event}`, session);
+      
+      if (event === 'SIGNED_IN' && session) {
+        // User berhasil login, buat profile dan load data
+        const userData = { 
+          id: session.user.id, 
+          email: session.user.email! 
+        };
+        setUser(userData);
+        setUserEmail(session.user.email!);
+        localStorage.setItem("user", JSON.stringify(userData));
+
+        // Auto create profile
+        const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+        setCurrentUserGender(userProfile.gender || "male");
+        setCurrentUserAvatar(userProfile.avatar_url || null);
+
+        // Start location tracking
+        startLocationTracking(session.user.id);
+        
+        setLoading(false);
+        setIsRedirecting(false);
+      }
+      else if (event === 'SIGNED_OUT') {
+        // User logout, reset state
+        setUser(null);
+        setUserEmail("");
+        localStorage.removeItem("user");
+        setLoading(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [startLocationTracking]);
+
+  // ✅ Initialize app - cek session yang ada
+  useEffect(() => {
+    const init = async () => {
+      try {
+        setLoadStep("Mengecek sesi pengguna...");
+
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (session?.user) {
+          console.log("✅ Existing session found");
+          const userData = { 
+            id: session.user.id, 
+            email: session.user.email! 
+          };
+          setUser(userData);
+          setUserEmail(session.user.email!);
+          localStorage.setItem("user", JSON.stringify(userData));
+
+          setLoadStep("Menyiapkan profil...");
+          
+          // Ensure profile exists
+          const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+          setCurrentUserGender(userProfile.gender || "male");
+          setCurrentUserAvatar(userProfile.avatar_url || null);
+
+          setLoadStep("Menyiapkan peta...");
+          
+          // Start location tracking
+          startLocationTracking(session.user.id);
+          
+          // Load initial nearby users
+          const cachedLocation = getCachedLocation();
+          if (cachedLocation) {
+            setLocation(cachedLocation);
+            loadNearbyUsers(session.user.id, cachedLocation);
+          }
+
+          await updateOnlineStatus(session.user.id, true);
+          setLoading(false);
+          
+        } else {
+          // Tidak ada session, tampilkan login screen
+          console.log("🔐 No session found");
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Initialization error:", error);
+        setLoading(false);
+      }
+    };
+
+    init();
+  }, [startLocationTracking, loadNearbyUsers]);
+
+  // ✅ Real-time updates untuk nearby users
   useEffect(() => {
     if (!user?.id) return;
 
@@ -220,7 +458,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
           event: 'UPDATE',
           schema: 'public',
           table: 'profiles',
-          filter: 'is_online=eq.true' // Hanya track online users
+          filter: 'is_online=eq.true'
         },
         (payload) => {
           if (mounted) {
@@ -237,65 +475,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
     };
   }, [user?.id]);
 
-  // ✅ Cek sesi & muat data awal
-  useEffect(() => {
-    const init = async () => {
-      try {
-        setLoadStep("Memuat aplikasi...");
-        
-        // Cek cached user untuk instant load
-        const cachedUser = localStorage.getItem("user");
-        if (cachedUser) {
-          const userData = JSON.parse(cachedUser);
-          setUser(userData);
-        }
-
-        const { data: { session } } = await supabase.auth.getSession();
-        
-        if (session?.user) {
-          const userData = { 
-            id: session.user.id, 
-            email: session.user.email! 
-          };
-          setUser(userData);
-          localStorage.setItem("user", JSON.stringify(userData));
-
-          setLoadStep("Menyiapkan peta...");
-          await loadUserProfile(session.user.id);
-          
-          // ✅ HYBRID: Start optimized location tracking
-          const cleanupLocationTracking = startLocationTracking(session.user.id);
-          
-          // Load initial nearby users
-          const cachedLocation = getCachedLocation();
-          if (cachedLocation) {
-            setLocation(cachedLocation);
-            loadNearbyUsers(session.user.id, cachedLocation);
-            setLoading(false); // Instant UI
-          }
-
-          await updateOnlineStatus(session.user.id, true);
-          
-          return cleanupLocationTracking;
-        } else {
-          setLoading(false);
-        }
-      } catch (error) {
-        console.error("Initialization error:", error);
-        setLoading(false);
-      }
-    };
-
-    const cleanupPromise = init();
-
-    return () => {
-      cleanupPromise.then(cleanup => {
-        if (cleanup) cleanup();
-      });
-    };
-  }, [startLocationTracking, loadNearbyUsers]);
-
-  // ✅ Refresh nearby users ketika ada real-time update
+  // ✅ Refresh nearby users
   useEffect(() => {
     if (refreshTrigger > 0 && user?.id && location) {
       console.log('🔄 Refreshing nearby users due to real-time update');
@@ -303,7 +483,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
     }
   }, [refreshTrigger, user?.id, location, loadNearbyUsers]);
 
-  // ✅ Auto update online status (optimized - setiap 2 menit)
+  // ✅ Auto update online status
   useEffect(() => {
     if (!user?.id) return;
 
@@ -313,14 +493,14 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
       if (mounted) {
         updateOnlineStatus(user.id, true);
       }
-    }, 2 * 60 * 1000); // Setiap 2 menit
+    }, 2 * 60 * 1000);
 
-    // Initial update
     updateOnlineStatus(user.id, true);
 
     return () => {
       mounted = false;
       clearInterval(interval);
+      // Cleanup on unmount
       if (user.id) {
         updateOnlineStatus(user.id, false);
       }
@@ -345,7 +525,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
       const cacheTime = localStorage.getItem("userLocationTime");
       
       if (cached && cacheTime) {
-        const isFresh = (Date.now() - parseInt(cacheTime)) < 60 * 60 * 1000; // 1 hour
+        const isFresh = (Date.now() - parseInt(cacheTime)) < 60 * 60 * 1000;
         if (isFresh) {
           return JSON.parse(cached);
         }
@@ -380,57 +560,13 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
 
   const getIndonesianCity = (): [number, number] => {
     const cities: [number, number][] = [
-      [-6.2088, 106.8456], // Jakarta
-      [-6.9175, 107.6191], // Bandung
-      [-7.2504, 112.7688], // Surabaya
-      [-6.5942, 106.7890], // Bogor
-      [-6.9667, 110.4167], // Semarang
-      [-0.7893, 113.9213], // Pontianak
-      [-2.5489, 118.0149], // Balikpapan
-      [-5.1477, 119.4327], // Makassar
-      [1.4748, 124.8426], // Manado 
+      [-6.2088, 106.8456], [-6.9175, 107.6191], [-7.2504, 112.7688],
+      [-6.5942, 106.7890], [-6.9667, 110.4167], [-0.7893, 113.9213],
+      [-2.5489, 118.0149], [-5.1477, 119.4327], [1.4748, 124.8426],
     ];
     return cities[Math.floor(Math.random() * cities.length)];
   };
 
-  const updateUserLocation = async (userId: string, coords: [number, number], reason: string) => {
-    try {
-      await supabase
-        .from("profiles")
-        .update({ 
-          latitude: coords[0], 
-          longitude: coords[1],
-          location_updated_at: new Date().toISOString(),
-          last_online: new Date().toISOString()
-        })
-        .eq("id", userId);
-      console.log(`📍 Location updated (${reason})`);
-    } catch (error) {
-      console.error("Error updating location:", error);
-    }
-  };
-
-  // ✅ Load user profile
-  const loadUserProfile = async (userId: string): Promise<void> => {
-    try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("gender, avatar_url, latitude, longitude, is_online")
-        .eq("id", userId)
-        .single();
-
-      if (error) throw error;
-
-      if (data) {
-        setCurrentUserGender(data?.gender || "male");
-        setCurrentUserAvatar(data?.avatar_url || null);
-      }
-    } catch (error) {
-      console.error("Profile load error:", error);
-    }
-  };
-
-  // ✅ Update status online
   const updateOnlineStatus = async (userId: string, isOnline: boolean) => {
     try {
       await supabase
@@ -445,8 +581,27 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
     }
   };
 
+  // ✅ Manual login handler
+  const handleManualLogin = async () => {
+    setIsRedirecting(true);
+    setLoadStep("Mengarahkan ke Google...");
+    try {
+      await signInWithGoogle();
+    } catch (error) {
+      console.error("Manual login failed:", error);
+      setIsRedirecting(false);
+    }
+  };
+
+  // ✅ Logout handler
+  const handleLogoutClick = () => {
+    if (user?.id) {
+      handleLogout(user.id);
+    }
+  };
+
   // ✅ Loading screen
-  if (loading) {
+  if (loading || isRedirecting) {
     return (
       <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
         <div className="text-center max-w-sm mx-auto px-6">
@@ -456,17 +611,24 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
             </div>
             <div className="absolute -inset-3 bg-blue-500/20 rounded-2xl blur-xl animate-pulse"></div>
           </div>
-          <h2 className="text-xl font-bold text-gray-800 mb-2">Memuat Peta</h2>
+          <h2 className="text-xl font-bold text-gray-800 mb-2">
+            {isRedirecting ? "Mengarahkan ke Login" : "Memuat Aplikasi"}
+          </h2>
           <p className="text-gray-600 mb-4 text-sm">{loadStep}</p>
           <div className="flex justify-center">
             <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
           </div>
+          {isRedirecting && (
+            <p className="text-sm text-gray-500 mt-4">
+              Sedang mengarahkan ke halaman login Google...
+            </p>
+          )}
         </div>
       </div>
     );
   }
 
-  // ✅ Jika belum login
+  // ✅ Login screen
   if (!user) {
     return (
       <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-50 to-purple-50">
@@ -474,14 +636,32 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
           <div className="w-20 h-20 mx-auto bg-gradient-to-r from-blue-500 to-purple-600 rounded-3xl flex items-center justify-center shadow-lg mb-4">
             <Wifi className="w-10 h-10 text-white" />
           </div>
-          <h2 className="text-2xl font-bold text-gray-800 mb-3">Akses Dibatasi</h2>
-          <p className="text-gray-600 mb-2">Silakan login terlebih dahulu</p>
+          <h2 className="text-2xl font-bold text-gray-800 mb-3">Jomblo Locator</h2>
+          <p className="text-gray-600 mb-6">Temukan teman sekitar Anda</p>
+
+          <button
+            onClick={handleManualLogin}
+            disabled={isRedirecting}
+            className="px-8 py-3 bg-blue-500 text-white rounded-lg shadow hover:bg-blue-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mx-auto w-full"
+          >
+            {isRedirecting ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Mengarahkan...
+              </>
+            ) : (
+              <>
+                <Wifi className="w-4 h-4" />
+                Login dengan Google
+              </>
+            )}
+          </button>
         </div>
       </div>
     );
   }
 
-  // ✅ Tampilan utama
+  // ✅ Main application
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 overflow-hidden">
       {/* HEADER */}
@@ -501,9 +681,30 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
           </h1>
         </div>
 
-        <div className="hidden md:flex items-center gap-3 text-gray-500">
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <span className="text-sm font-medium">Online</span>
+        <div className="flex items-center gap-4">
+          {/* User info */}
+          <div className="hidden md:flex items-center gap-2 text-gray-600">
+            <User className="w-4 h-4" />
+            <span className="text-sm font-medium truncate max-w-32">
+              {userEmail.split('@')[0]}
+            </span>
+          </div>
+
+          {/* Online status */}
+          <div className="hidden md:flex items-center gap-2 text-gray-500">
+            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            <span className="text-sm font-medium">Online</span>
+          </div>
+
+          {/* Logout button */}
+          <button
+            onClick={handleLogoutClick}
+            className="bg-white p-2 rounded-xl shadow-md hover:bg-red-50 transition-all duration-200"
+            aria-label="Logout"
+            title="Logout"
+          >
+            <LogOut className="w-5 h-5 text-gray-700" />
+          </button>
         </div>
       </header>
 
@@ -515,7 +716,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
         />
       </div>
 
-      {/* KONTEN UTAMA */}
+      {/* MAIN CONTENT */}
       <div className="flex flex-1 relative overflow-hidden">
         {/* SIDEBAR */}
         {showSidebar && (
@@ -526,7 +727,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
           />
         )}
 
-        {/* PETA */}
+        {/* MAP */}
         <div className={`transition-all duration-300 ${
           showSidebar ? "md:ml-0" : "ml-0"
         } flex-1 relative`}>
@@ -540,7 +741,7 @@ const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: 
         </div>
       </div>
 
-      {/* OVERLAY MOBILE */}
+      {/* MOBILE OVERLAY */}
       {showSidebar && (
         <div
           className="fixed inset-0 bg-black/40 backdrop-blur-sm z-20 md:hidden"
