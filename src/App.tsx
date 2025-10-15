@@ -4,7 +4,7 @@ import  Map  from "./components/Map";
 import { SidebarUser } from "./components/SidebarUser";
 import { HorizontalUserScroll } from "./components/UserList";
 import { Loader2, MapPin, Wifi, Menu, LogOut, User } from "lucide-react";
-import "./index.css";
+import "../index.css";
 
 type User = {
   id: string;
@@ -874,4 +874,5 @@ export const App: React.FC = () => {
 };
 
 export default App;
+
 
