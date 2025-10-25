@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { supabase, getStoragePublicUrl } from "./lib/supabase"; // ✅ Import fungsi yang benar
+import { supabase, getStoragePublicUrl } from "./lib/supabase";
 import Map from "./components/Map";
 import { SidebarUser } from "./components/SidebarUser";
 import { HorizontalUserScroll } from "./components/UserList";
@@ -18,25 +18,7 @@ type UserProfile = {
   longitude?: number | null;
   is_online?: boolean | null;
   username?: string | null;
-  age?: number | null;
-  bio?: string | null;
-  interests?: string[] | null;
-  location?: string | null;
-  last_online?: string | null;
-  public_key?: string | null;
 };
-
-// ✅ HAPUS fungsi getAvatarUrl yang lama, gunakan yang dari supabase.ts
-// const getAvatarUrl = (avatarUrl: string | null | undefined): string | null => {
-//   if (!avatarUrl) return null;
-//   try {
-//     if (avatarUrl.startsWith('http')) return avatarUrl;
-//     const { data } = supabase.storage.from('avatars').getPublicUrl(avatarUrl);
-//     return data.publicUrl;
-//   } catch (error) {
-//     return null;
-//   }
-// };
 
 // ✅ Fungsi login dengan Google
 const signInWithGoogle = async () => {
@@ -51,16 +33,15 @@ const signInWithGoogle = async () => {
   return data;
 };
 
-// ✅ FIXED: createUserProfile dengan approach yang sangat sederhana
+// ✅ FIXED: createUserProfile yang konsisten
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
-    console.log("🆕 Creating profile for:", userId);
+    console.log("🆕 Creating/ensuring profile for:", userId);
     
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error("No session");
 
-    // Data yang sangat minimal untuk avoid errors
-    const minimalProfile = {
+    const profileData = {
       id: userId,
       username: email.split('@')[0] || `user_${userId.slice(0, 8)}`,
       gender: "male" as const,
@@ -69,57 +50,47 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
       created_at: new Date().toISOString()
     };
 
-    console.log("📝 Inserting minimal profile...");
+    console.log("📝 Upserting profile...");
 
-    // ✅ Coba insert tanpa expect response
-    const { error: insertError } = await supabase
+    // ✅ GUNAKAN UPSERT (insert or update) untuk menghindari race condition
+    const { error: upsertError } = await supabase
       .from("profiles")
-      .insert(minimalProfile);
+      .upsert(profileData, {
+        onConflict: 'id',
+        ignoreDuplicates: false
+      });
 
-    if (insertError) {
-      console.error("❌ Insert error:", insertError);
-      
-      // Jika profile sudah ada, anggap sukses
-      if (insertError.code === '23505') {
-        console.log("✅ Profile already exists");
-        return {
-          gender: "male",
-          avatar_url: null,
-          is_online: true,
-          latitude: null,
-          longitude: null
-        };
-      }
-      
-      console.log("🔄 Profile creation failed, but continuing...");
+    if (upsertError) {
+      console.error("❌ Upsert error:", upsertError);
+      // Continue anyway - profile mungkin sudah ada
     } else {
-      console.log("✅ Profile inserted successfully");
+      console.log("✅ Profile upserted successfully");
     }
 
-    // Return default profile
+    // ✅ SELALU return profile data yang konsisten
     return {
       gender: "male",
       avatar_url: null,
       is_online: true,
       latitude: null,
-      longitude: null
+      longitude: null,
+      username: profileData.username
     };
 
   } catch (error) {
     console.error("❌ Create profile error:", error);
-    
-    // Last resort - anggap profile berhasil dibuat
     return {
       gender: "male",
       avatar_url: null,
       is_online: true,
       latitude: null,
-      longitude: null
+      longitude: null,
+      username: email.split('@')[0] || `user_${userId.slice(0, 8)}`
     };
   }
 };
 
-// ✅ FIXED: ensureUserProfile yang sangat sederhana
+// ✅ FIXED: ensureUserProfile yang lebih reliable
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🔍 Ensuring profile for:", userId);
@@ -136,11 +107,19 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
 
     if (fetchError) {
       console.error("❌ Fetch error:", fetchError);
+      // Lanjutkan untuk buat profile
     }
 
     if (existingProfile) {
-      console.log("✅ Profile exists");
-      return existingProfile;
+      console.log("✅ Profile exists, returning:", existingProfile);
+      return {
+        gender: existingProfile.gender || "male",
+        avatar_url: existingProfile.avatar_url,
+        is_online: true, // Always set to true on login
+        latitude: existingProfile.latitude,
+        longitude: existingProfile.longitude,
+        username: existingProfile.username
+      };
     }
 
     console.log("🆕 Profile not found, creating...");
@@ -148,8 +127,7 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
 
   } catch (error) {
     console.error("❌ Ensure profile error:", error);
-    
-    // Fallback: langsung buat profile
+    // Fallback ke create profile
     return await createUserProfile(userId, email);
   }
 };
@@ -185,6 +163,7 @@ export const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [currentUserGender, setCurrentUserGender] = useState<"male" | "female">("male");
   const [currentUserAvatar, setCurrentUserAvatar] = useState<string | null>(null);
+  const [currentUsername, setCurrentUsername] = useState<string>("");
   const [location, setLocation] = useState<[number, number] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadStep, setLoadStep] = useState<string>("Mengecek sesi...");
@@ -194,6 +173,9 @@ export const App: React.FC = () => {
   const [userEmail, setUserEmail] = useState<string>("");
   const [profileCreated, setProfileCreated] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // ✅ FIXED: Single source of truth untuk profile state
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
   // ✅ Auth state listener
   useEffect(() => {
@@ -217,17 +199,18 @@ export const App: React.FC = () => {
           setLoadStep("Membuat profil...");
           
           // Tunggu untuk session stabil
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 1000));
           
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+          
+          // ✅ SET SEMUA STATE SEKALIGUS - hindari race condition
+          setUserProfile(userProfile);
           setCurrentUserGender(userProfile.gender || "male");
-          
-          // ✅ FIXED: Gunakan getStoragePublicUrl dari supabase.ts
           setCurrentUserAvatar(userProfile.avatar_url ? getStoragePublicUrl(userProfile.avatar_url) : null);
-          
+          setCurrentUsername(userProfile.username || userData.email.split('@')[0]);
           setProfileCreated(true);
           
-          console.log("✅ Profile setup completed");
+          console.log("✅ Profile setup completed - all states set");
           
           // Set online status
           try {
@@ -249,6 +232,7 @@ export const App: React.FC = () => {
           setUser(null);
           setUserEmail("");
           setAuthError(null);
+          setUserProfile(null);
           localStorage.removeItem("user");
           setProfileCreated(false);
           setLoading(false);
@@ -285,11 +269,12 @@ export const App: React.FC = () => {
           setLoadStep("Menyiapkan profil...");
           
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
+          
+          // ✅ SET SEMUA STATE SEKALIGUS
+          setUserProfile(userProfile);
           setCurrentUserGender(userProfile.gender || "male");
-          
-          // ✅ FIXED: Gunakan getStoragePublicUrl dari supabase.ts
           setCurrentUserAvatar(userProfile.avatar_url ? getStoragePublicUrl(userProfile.avatar_url) : null);
-          
+          setCurrentUsername(userProfile.username || userData.email.split('@')[0]);
           setProfileCreated(true);
 
           setLoadStep("Menyiapkan peta...");
@@ -298,7 +283,10 @@ export const App: React.FC = () => {
           const cachedLocation = getCachedLocation();
           if (cachedLocation) {
             setLocation(cachedLocation);
-            loadNearbyUsers(session.user.id, cachedLocation);
+            // ✅ PASTIKAN profileCreated sudah true sebelum load nearby users
+            setTimeout(() => {
+              loadNearbyUsers(session.user.id, cachedLocation);
+            }, 1000);
           }
 
           setLoading(false);
@@ -317,9 +305,12 @@ export const App: React.FC = () => {
     init();
   }, []);
 
-  // ✅ Location tracking
+  // ✅ Location tracking - FIXED: Gunakan userProfile sebagai dependency
   const startLocationTracking = useCallback((userId: string) => {
-    if (!profileCreated) return () => {};
+    if (!userProfile) {
+      console.log("⏳ Waiting for userProfile...");
+      return () => {};
+    }
 
     console.log("🚀 Starting location tracking...");
     
@@ -359,23 +350,26 @@ export const App: React.FC = () => {
     return () => {
       if (watchId) navigator.geolocation.clearWatch(watchId);
     };
-  }, [profileCreated]);
+  }, [userProfile]); // ✅ Dependency pada userProfile, bukan profileCreated
 
   useEffect(() => {
-    if (user?.id && profileCreated) {
+    if (user?.id && userProfile) {
+      console.log("📍 Starting location tracking with userProfile:", userProfile);
       const cleanup = startLocationTracking(user.id);
       return cleanup;
     }
-  }, [user?.id, profileCreated, startLocationTracking]);
+  }, [user?.id, userProfile, startLocationTracking]);
 
-  // ✅ Nearby users loading
+  // ✅ Nearby users loading - FIXED: Gunakan userProfile sebagai condition
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
-    if (!userLocation || !profileCreated) {
-      console.log("❌ Cannot load nearby users: No location or profile not created");
+    if (!userLocation || !userProfile) {
+      console.log("❌ Cannot load nearby users: No location or userProfile not ready");
       return;
     }
 
     try {
+      console.log("📍 Loading nearby users...");
+      
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       
       const { data, error } = await supabase
@@ -403,7 +397,6 @@ export const App: React.FC = () => {
         const usersWithDistance = data
           .map(user => ({
             ...user,
-            // ✅ FIXED: Gunakan getStoragePublicUrl dari supabase.ts
             avatar_url: user.avatar_url ? getStoragePublicUrl(user.avatar_url) : null,
             distance: calculateDistance(
               userLocation[0], userLocation[1],
@@ -423,11 +416,11 @@ export const App: React.FC = () => {
     } catch (error) {
       console.error("Nearby users error:", error);
     }
-  }, [profileCreated]);
+  }, [userProfile]); // ✅ Dependency pada userProfile
 
   // ✅ Real-time updates
   useEffect(() => {
-    if (!user?.id || !profileCreated) return;
+    if (!user?.id || !userProfile) return;
 
     let mounted = true;
 
@@ -452,7 +445,7 @@ export const App: React.FC = () => {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, [user?.id, profileCreated, location, loadNearbyUsers]);
+  }, [user?.id, userProfile, location, loadNearbyUsers]);
 
   // ✅ Helper functions
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
@@ -515,7 +508,7 @@ export const App: React.FC = () => {
   // ✅ Toggle sidebar handler
   const toggleSidebar = () => setShowSidebar(prev => !prev);
 
-  // ... (rest of the component remains the same)
+  // ... (rest of the component JSX remains the same)
   // ✅ Loading screen
   if (loading || isRedirecting) {
     return (
@@ -605,7 +598,7 @@ export const App: React.FC = () => {
               <User className="w-4 h-4" />
             )}
             <span className="text-sm font-medium truncate max-w-32">
-              {userEmail.split('@')[0]}
+              {currentUsername || userEmail.split('@')[0]}
             </span>
           </div>
 
