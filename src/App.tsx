@@ -17,6 +17,13 @@ type UserProfile = {
   latitude?: number | null;
   longitude?: number | null;
   is_online?: boolean | null;
+  username?: string | null;
+  age?: number | null;
+  bio?: string | null;
+  interests?: string[] | null;
+  location?: string | null;
+  last_online?: string | null;
+  public_key?: string | null;
 };
 
 // ✅ Fungsi login dengan Google
@@ -47,27 +54,29 @@ const signInWithGoogle = async () => {
   }
 };
 
-// ✅ FIXED: Better auto create profile dengan retry mechanism
+// ✅ FIXED: Compatible dengan schema profiles
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🆕 Creating new user profile for:", userId);
     
-    // Tunggu sebentar untuk pastikan auth transaction selesai
     await new Promise(resolve => setTimeout(resolve, 500));
     
     const profileData = {
       id: userId,
       username: email.split('@')[0] || `user_${userId.slice(0, 8)}`,
-      email: email,
       gender: "male" as const,
       avatar_url: null,
       is_online: true,
       last_online: new Date().toISOString(),
       created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
       latitude: null,
       longitude: null,
-      location_updated_at: new Date().toISOString()
+      location_updated_at: new Date().toISOString(),
+      age: null,
+      bio: null,
+      interests: null,
+      location: null,
+      public_key: null
     };
 
     console.log("📝 Profile data to insert:", profileData);
@@ -75,7 +84,7 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
     const { data, error } = await supabase
       .from("profiles")
       .insert(profileData)
-      .select("gender, avatar_url, latitude, longitude, is_online")
+      .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
       .single();
 
     if (error) {
@@ -86,7 +95,7 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
         console.log("🔄 Profile already exists, fetching existing...");
         const { data: existingData, error: fetchError } = await supabase
           .from("profiles")
-          .select("gender, avatar_url, latitude, longitude, is_online")
+          .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
           .eq("id", userId)
           .single();
         
@@ -101,7 +110,6 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
       const minimalProfile = {
         id: userId,
         username: email.split('@')[0],
-        email: email,
         gender: "male" as const,
         is_online: true,
         last_online: new Date().toISOString()
@@ -110,7 +118,7 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
       const { data: minimalData, error: minimalError } = await supabase
         .from("profiles")
         .insert(minimalProfile)
-        .select("gender, avatar_url, latitude, longitude, is_online")
+        .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
         .single();
 
       if (!minimalError && minimalData) {
@@ -153,7 +161,7 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
       try {
         const { data: existingProfile, error } = await supabase
           .from("profiles")
-          .select("gender, avatar_url, latitude, longitude, is_online")
+          .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
           .eq("id", userId)
           .maybeSingle();
 
@@ -493,7 +501,7 @@ export const App: React.FC = () => {
     }
   }, [user?.id, profileCreated, startLocationTracking]);
 
-  // ✅ HYBRID: Optimized nearby users loading
+  // ✅ HYBRID: Optimized nearby users loading - COMPATIBLE dengan schema
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
     if (!userLocation || !profileCreated) return;
 
@@ -505,7 +513,7 @@ export const App: React.FC = () => {
         .select(`
           id, username, avatar_url, age, bio, interests, 
           location, is_online, last_online, latitude, longitude, gender,
-          location_updated_at
+          location_updated_at, public_key
         `)
         .neq("id", currentUserId)
         .eq("is_online", true)
