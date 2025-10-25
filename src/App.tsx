@@ -26,6 +26,28 @@ type UserProfile = {
   public_key?: string | null;
 };
 
+// ✅ Fungsi untuk mendapatkan URL avatar dari Supabase Storage
+const getAvatarUrl = (avatarUrl: string | null | undefined): string | null => {
+  if (!avatarUrl) return null;
+  
+  try {
+    // Jika avatar_url sudah berupa URL lengkap, return langsung
+    if (avatarUrl.startsWith('http')) {
+      return avatarUrl;
+    }
+    
+    // Jika avatar_url adalah path di storage, dapatkan URL dari Supabase
+    const { data } = supabase.storage
+      .from('avatars')
+      .getPublicUrl(avatarUrl);
+    
+    return data.publicUrl;
+  } catch (error) {
+    console.error('Error getting avatar URL:', error);
+    return null;
+  }
+};
+
 // ✅ Fungsi login dengan Google
 const signInWithGoogle = async () => {
   try {
@@ -298,7 +320,11 @@ export const App: React.FC = () => {
             try {
               const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
               setCurrentUserGender(userProfile.gender || "male");
-              setCurrentUserAvatar(userProfile.avatar_url || null);
+              
+              // ✅ FIXED: Set avatar URL dengan fungsi getAvatarUrl
+              const avatarUrl = getAvatarUrl(userProfile.avatar_url);
+              setCurrentUserAvatar(avatarUrl);
+              
               setProfileCreated(true);
               
               console.log("✅ Profile setup completed");
@@ -381,7 +407,11 @@ export const App: React.FC = () => {
           // Ensure profile exists
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
           setCurrentUserGender(userProfile.gender || "male");
-          setCurrentUserAvatar(userProfile.avatar_url || null);
+          
+          // ✅ FIXED: Set avatar URL dengan fungsi getAvatarUrl
+          const avatarUrl = getAvatarUrl(userProfile.avatar_url);
+          setCurrentUserAvatar(avatarUrl);
+          
           setProfileCreated(true);
 
           setLoadStep("Menyiapkan peta...");
@@ -507,7 +537,7 @@ export const App: React.FC = () => {
     }
   }, [user?.id, profileCreated, startLocationTracking]);
 
-  // ✅ HYBRID: Optimized nearby users loading - COMPATIBLE dengan schema
+  // ✅ HYBRID: Optimized nearby users loading - DENGAN AVATAR URL
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
     if (!userLocation || !profileCreated) return;
 
@@ -534,9 +564,12 @@ export const App: React.FC = () => {
       }
 
       if (data) {
+        // ✅ FIXED: Process users dengan avatar URL yang benar
         const usersWithDistance = data
           .map(user => ({
             ...user,
+            // ✅ Tambahkan avatar_url yang sudah diproses
+            avatar_url: getAvatarUrl(user.avatar_url),
             distance: calculateDistance(
               userLocation[0], userLocation[1],
               user.latitude!, user.longitude!
@@ -547,7 +580,7 @@ export const App: React.FC = () => {
           .slice(0, 20);
 
         setNearbyUsers(usersWithDistance);
-        console.log(`📍 Loaded ${usersWithDistance.length} nearby users`);
+        console.log(`📍 Loaded ${usersWithDistance.length} nearby users with avatars`);
       }
     } catch (error) {
       console.error("Nearby users error:", error);
@@ -814,9 +847,17 @@ export const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-4">
-          {/* User info */}
+          {/* User info dengan avatar */}
           <div className="hidden md:flex items-center gap-2 text-gray-600">
-            <User className="w-4 h-4" />
+            {currentUserAvatar ? (
+              <img 
+                src={currentUserAvatar} 
+                alt="Avatar" 
+                className="w-6 h-6 rounded-full object-cover"
+              />
+            ) : (
+              <User className="w-4 h-4" />
+            )}
             <span className="text-sm font-medium truncate max-w-32">
               {userEmail.split('@')[0]}
             </span>
@@ -871,7 +912,7 @@ export const App: React.FC = () => {
           )}
         </div>
 
-        {/* MAP */}
+        {/* MAP dengan nearby users yang sudah include avatar URLs */}
         <div className={`
           flex-1 transition-all duration-300 relative z-10
           ${showSidebar ? 'md:ml-80' : 'ml-0'}
@@ -899,4 +940,3 @@ export const App: React.FC = () => {
 };
 
 export default App;
-
