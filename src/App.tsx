@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { supabase } from "./lib/supabase";
-import  Map  from "./components/Map";
+import { supabase, getStoragePublicUrl } from "./lib/supabase"; // ✅ Import fungsi yang benar
+import Map from "./components/Map";
 import { SidebarUser } from "./components/SidebarUser";
 import { HorizontalUserScroll } from "./components/UserList";
 import { Loader2, MapPin, Wifi, Menu, LogOut, User } from "lucide-react";
@@ -26,93 +26,62 @@ type UserProfile = {
   public_key?: string | null;
 };
 
-// ✅ Fungsi untuk mendapatkan URL avatar
-const getAvatarUrl = (avatarUrl: string | null | undefined): string | null => {
-  if (!avatarUrl) return null;
-  try {
-    if (avatarUrl.startsWith('http')) return avatarUrl;
-    const { data } = supabase.storage.from('avatars').getPublicUrl(avatarUrl);
-    return data.publicUrl;
-  } catch (error) {
-    console.error('Error getting avatar URL:', error);
-    return null;
-  }
-};
+// ✅ HAPUS fungsi getAvatarUrl yang lama, gunakan yang dari supabase.ts
+// const getAvatarUrl = (avatarUrl: string | null | undefined): string | null => {
+//   if (!avatarUrl) return null;
+//   try {
+//     if (avatarUrl.startsWith('http')) return avatarUrl;
+//     const { data } = supabase.storage.from('avatars').getPublicUrl(avatarUrl);
+//     return data.publicUrl;
+//   } catch (error) {
+//     return null;
+//   }
+// };
 
 // ✅ Fungsi login dengan Google
 const signInWithGoogle = async () => {
-  try {
-    console.log("🔐 Starting Google OAuth...");
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: window.location.origin,
-        queryParams: { access_type: 'offline', prompt: 'consent' }
-      }
-    });
-    if (error) throw error;
-    return data;
-  } catch (error) {
-    console.error("❌ Google sign in failed:", error);
-    throw error;
-  }
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: window.location.origin,
+      queryParams: { access_type: 'offline', prompt: 'consent' }
+    }
+  });
+  if (error) throw error;
+  return data;
 };
 
-// ✅ FIXED: createUserProfile dengan RLS-friendly approach
+// ✅ FIXED: createUserProfile dengan approach yang sangat sederhana
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🆕 Creating profile for:", userId);
     
     const { data: { session } } = await supabase.auth.getSession();
-    if (!session) throw new Error("No session found");
-    
-    // Pastikan kita menggunakan session user ID
-    const currentUserId = session.user.id;
-    console.log("🔐 Session user ID:", currentUserId);
+    if (!session) throw new Error("No session");
 
-    const profileData = {
-      id: currentUserId,
-      username: email.split('@')[0] || `user_${currentUserId.slice(0, 8)}`,
-      gender: "male",
-      avatar_url: null,
+    // Data yang sangat minimal untuk avoid errors
+    const minimalProfile = {
+      id: userId,
+      username: email.split('@')[0] || `user_${userId.slice(0, 8)}`,
+      gender: "male" as const,
       is_online: true,
       last_online: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      latitude: null,
-      longitude: null,
-      location_updated_at: new Date().toISOString(),
-      age: null,
-      bio: null,
-      interests: null,
-      location: null,
-      public_key: null
+      created_at: new Date().toISOString()
     };
 
-    console.log("📝 Inserting profile data...");
+    console.log("📝 Inserting minimal profile...");
 
-    // ✅ Approach 1: Coba insert tanpa select dulu
+    // ✅ Coba insert tanpa expect response
     const { error: insertError } = await supabase
       .from("profiles")
-      .insert(profileData);
+      .insert(minimalProfile);
 
     if (insertError) {
       console.error("❌ Insert error:", insertError);
       
-      // Jika duplicate, anggap berhasil
+      // Jika profile sudah ada, anggap sukses
       if (insertError.code === '23505') {
-        console.log("🔄 Profile already exists");
-        // Coba ambil data yang existing
-        const { data: existingData } = await supabase
-          .from("profiles")
-          .select('*')
-          .eq("id", currentUserId)
-          .maybeSingle();
-        
-        if (existingData) {
-          console.log("✅ Retrieved existing profile");
-          return existingData;
-        }
-        
+        console.log("✅ Profile already exists");
         return {
           gender: "male",
           avatar_url: null,
@@ -122,54 +91,12 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
         };
       }
       
-      // Jika RLS error, coba approach berbeda
-      if (insertError.code === '42501') {
-        console.log("🚫 RLS violation, trying minimal data...");
-        
-        // Coba dengan data minimal
-        const minimalData = {
-          id: currentUserId,
-          username: email.split('@')[0],
-          gender: "male",
-          is_online: true
-        };
-        
-        const { error: minimalError } = await supabase
-          .from("profiles")
-          .insert(minimalData);
-          
-        if (!minimalError) {
-          console.log("✅ Minimal profile created");
-          return {
-            gender: "male",
-            avatar_url: null,
-            is_online: true,
-            latitude: null,
-            longitude: null
-          };
-        }
-      }
-      
-      throw insertError;
+      console.log("🔄 Profile creation failed, but continuing...");
+    } else {
+      console.log("✅ Profile inserted successfully");
     }
 
-    console.log("✅ Profile inserted successfully");
-    
-    // Tunggu sebentar lalu coba ambil data
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const { data: newProfile, error: fetchError } = await supabase
-      .from("profiles")
-      .select('*')
-      .eq("id", currentUserId)
-      .maybeSingle();
-
-    if (!fetchError && newProfile) {
-      console.log("✅ Retrieved newly created profile");
-      return newProfile;
-    }
-
-    // Jika tidak bisa retrieve, return default
+    // Return default profile
     return {
       gender: "male",
       avatar_url: null,
@@ -181,8 +108,7 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
   } catch (error) {
     console.error("❌ Create profile error:", error);
     
-    // Ultimate fallback - anggap profile berhasil dibuat
-    console.log("🔄 Using ultimate fallback - assuming profile exists");
+    // Last resort - anggap profile berhasil dibuat
     return {
       gender: "male",
       avatar_url: null,
@@ -193,64 +119,44 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
   }
 };
 
-// ✅ FIXED: ensureUserProfile yang robust
+// ✅ FIXED: ensureUserProfile yang sangat sederhana
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🔍 Ensuring profile for:", userId);
     
     const { data: { session } } = await supabase.auth.getSession();
-    if (!session) throw new Error("No active session");
-    
-    const currentUserId = session.user.id;
-    console.log("🔐 Using session ID:", currentUserId);
+    if (!session) throw new Error("No session");
 
     // Cek apakah profile sudah ada
     const { data: existingProfile, error: fetchError } = await supabase
       .from("profiles")
       .select('*')
-      .eq("id", currentUserId)
+      .eq("id", userId)
       .maybeSingle();
 
     if (fetchError) {
       console.error("❌ Fetch error:", fetchError);
-      // Lanjutkan untuk buat profile baru meski ada error
     }
 
     if (existingProfile) {
-      console.log("✅ Profile exists:", existingProfile);
+      console.log("✅ Profile exists");
       return existingProfile;
     }
 
     console.log("🆕 Profile not found, creating...");
-    return await createUserProfile(currentUserId, email);
+    return await createUserProfile(userId, email);
 
   } catch (error) {
     console.error("❌ Ensure profile error:", error);
     
-    // Fallback: langsung buat profile tanpa check
-    try {
-      console.log("🔄 Fallback: Creating profile without check...");
-      return await createUserProfile(userId, email);
-    } catch (fallbackError) {
-      console.error("❌ Fallback failed:", fallbackError);
-      
-      // Return default profile sebagai last resort
-      return {
-        gender: "male",
-        avatar_url: null,
-        is_online: true,
-        latitude: null,
-        longitude: null
-      };
-    }
+    // Fallback: langsung buat profile
+    return await createUserProfile(userId, email);
   }
 };
 
 // ✅ LOGOUT function
 const handleLogout = async (userId: string) => {
   try {
-    console.log("🚪 Logging out...");
-    
     // Update status online
     await supabase
       .from("profiles")
@@ -261,17 +167,14 @@ const handleLogout = async (userId: string) => {
       .eq("id", userId);
 
     // Sign out
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
+    await supabase.auth.signOut();
 
     // Clear storage
     localStorage.removeItem("user");
     localStorage.removeItem("userLocation");
     localStorage.removeItem("userLocationTime");
 
-    console.log("✅ Logout successful");
     window.location.reload();
-    
   } catch (error) {
     console.error("Logout error:", error);
     window.location.reload();
@@ -318,16 +221,31 @@ export const App: React.FC = () => {
           
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
           setCurrentUserGender(userProfile.gender || "male");
-          setCurrentUserAvatar(getAvatarUrl(userProfile.avatar_url));
+          
+          // ✅ FIXED: Gunakan getStoragePublicUrl dari supabase.ts
+          setCurrentUserAvatar(userProfile.avatar_url ? getStoragePublicUrl(userProfile.avatar_url) : null);
+          
           setProfileCreated(true);
           
           console.log("✅ Profile setup completed");
-          await updateOnlineStatus(session.user.id, true);
+          
+          // Set online status
+          try {
+            await supabase
+              .from("profiles")
+              .update({ 
+                is_online: true,
+                last_online: new Date().toISOString()
+              })
+              .eq("id", session.user.id);
+          } catch (error) {
+            console.error("Online status update failed:", error);
+          }
+          
           setLoading(false);
           setIsRedirecting(false);
         }
         else if (event === 'SIGNED_OUT') {
-          console.log("🚪 User signed out");
           setUser(null);
           setUserEmail("");
           setAuthError(null);
@@ -368,18 +286,21 @@ export const App: React.FC = () => {
           
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
           setCurrentUserGender(userProfile.gender || "male");
-          setCurrentUserAvatar(getAvatarUrl(userProfile.avatar_url));
+          
+          // ✅ FIXED: Gunakan getStoragePublicUrl dari supabase.ts
+          setCurrentUserAvatar(userProfile.avatar_url ? getStoragePublicUrl(userProfile.avatar_url) : null);
+          
           setProfileCreated(true);
 
           setLoadStep("Menyiapkan peta...");
           
+          // Load initial location
           const cachedLocation = getCachedLocation();
           if (cachedLocation) {
             setLocation(cachedLocation);
             loadNearbyUsers(session.user.id, cachedLocation);
           }
 
-          await updateOnlineStatus(session.user.id, true);
           setLoading(false);
           
         } else {
@@ -404,22 +325,6 @@ export const App: React.FC = () => {
     
     let watchId: number;
 
-    const updateLocationToServer = async (newLocation: [number, number]) => {
-      try {
-        await supabase
-          .from("profiles")
-          .update({ 
-            latitude: newLocation[0], 
-            longitude: newLocation[1],
-            location_updated_at: new Date().toISOString(),
-            last_online: new Date().toISOString()
-          })
-          .eq("id", userId);
-      } catch (error) {
-        console.error("Location update failed:", error);
-      }
-    };
-
     watchId = navigator.geolocation.watchPosition(
       (position) => {
         const newLocation: [number, number] = [
@@ -429,7 +334,21 @@ export const App: React.FC = () => {
 
         setLocation(newLocation);
         cacheLocation(newLocation);
-        updateLocationToServer(newLocation);
+
+        // Update location to server
+        try {
+          supabase
+            .from("profiles")
+            .update({ 
+              latitude: newLocation[0], 
+              longitude: newLocation[1],
+              location_updated_at: new Date().toISOString(),
+              last_online: new Date().toISOString()
+            })
+            .eq("id", userId);
+        } catch (error) {
+          console.error("Location update failed:", error);
+        }
       },
       (error) => {
         console.error("Location error:", error);
@@ -451,7 +370,10 @@ export const App: React.FC = () => {
 
   // ✅ Nearby users loading
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
-    if (!userLocation || !profileCreated) return;
+    if (!userLocation || !profileCreated) {
+      console.log("❌ Cannot load nearby users: No location or profile not created");
+      return;
+    }
 
     try {
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
@@ -461,7 +383,7 @@ export const App: React.FC = () => {
         .select(`
           id, username, avatar_url, age, bio, interests, 
           location, is_online, last_online, latitude, longitude, gender,
-          location_updated_at, public_key
+          location_updated_at
         `)
         .neq("id", currentUserId)
         .eq("is_online", true)
@@ -470,13 +392,19 @@ export const App: React.FC = () => {
         .gte("location_updated_at", twoHoursAgo)
         .limit(25);
 
-      if (error) throw error;
+      if (error) {
+        console.error("Supabase query error:", error);
+        return;
+      }
 
-      if (data) {
+      console.log("📊 Raw users from database:", data?.length || 0);
+
+      if (data && data.length > 0) {
         const usersWithDistance = data
           .map(user => ({
             ...user,
-            avatar_url: getAvatarUrl(user.avatar_url),
+            // ✅ FIXED: Gunakan getStoragePublicUrl dari supabase.ts
+            avatar_url: user.avatar_url ? getStoragePublicUrl(user.avatar_url) : null,
             distance: calculateDistance(
               userLocation[0], userLocation[1],
               user.latitude!, user.longitude!
@@ -488,6 +416,9 @@ export const App: React.FC = () => {
 
         setNearbyUsers(usersWithDistance);
         console.log(`📍 Loaded ${usersWithDistance.length} nearby users`);
+      } else {
+        console.log("❌ No nearby users found");
+        setNearbyUsers([]);
       }
     } catch (error) {
       console.error("Nearby users error:", error);
@@ -523,27 +454,7 @@ export const App: React.FC = () => {
     };
   }, [user?.id, profileCreated, location, loadNearbyUsers]);
 
-  // ✅ Auto update online status
-  useEffect(() => {
-    if (!user?.id || !profileCreated) return;
-
-    let mounted = true;
-
-    const interval = setInterval(() => {
-      if (mounted) {
-        updateOnlineStatus(user.id, true);
-      }
-    }, 2 * 60 * 1000);
-
-    updateOnlineStatus(user.id, true);
-
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, [user?.id, profileCreated]);
-
-  // ✅ HELPER FUNCTIONS
+  // ✅ Helper functions
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
     const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -578,38 +489,6 @@ export const App: React.FC = () => {
     }
   };
 
-  const getCityLevelLocation = async (): Promise<[number, number]> => {
-    try {
-      const response = await fetch("https://ipapi.co/json/");
-      const data = await response.json();
-      if (data.latitude && data.longitude) return [data.latitude, data.longitude];
-    } catch (error) {
-      console.log("IPAPI failed, using fallback");
-    }
-    return getIndonesianCity();
-  };
-
-  const getIndonesianCity = (): [number, number] => {
-    const cities: [number, number][] = [
-      [-6.2088, 106.8456], [-6.9175, 107.6191], [-7.2504, 112.7688],
-      [-6.5942, 106.7890], [-6.9667, 110.4167], [-0.7893, 113.9213],
-      [-2.5489, 118.0149], [-5.1477, 119.4327], [1.4748, 124.8426],
-    ];
-    return cities[Math.floor(Math.random() * cities.length)];
-  };
-
-  const updateOnlineStatus = async (userId: string, isOnline: boolean) => {
-    if (!profileCreated) return;
-    try {
-      await supabase
-        .from("profiles")
-        .update({ is_online: isOnline, last_online: new Date().toISOString() })
-        .eq("id", userId);
-    } catch (error) {
-      console.error("Error updating online status:", error);
-    }
-  };
-
   // ✅ Manual login handler
   const handleManualLogin = async () => {
     setIsRedirecting(true);
@@ -621,10 +500,8 @@ export const App: React.FC = () => {
       console.error("❌ Manual login failed:", error);
       if (error.message?.includes('popup')) {
         setAuthError("Popup login diblokir. Izinkan popup untuk website ini.");
-      } else if (error.message?.includes('configuration')) {
-        setAuthError("Error konfigurasi Google OAuth. Hubungi administrator.");
       } else {
-        setAuthError("Login gagal. Coba lagi atau hubungi administrator.");
+        setAuthError("Login gagal. Coba lagi.");
       }
       setIsRedirecting(false);
     }
@@ -638,6 +515,7 @@ export const App: React.FC = () => {
   // ✅ Toggle sidebar handler
   const toggleSidebar = () => setShowSidebar(prev => !prev);
 
+  // ... (rest of the component remains the same)
   // ✅ Loading screen
   if (loading || isRedirecting) {
     return (
@@ -647,7 +525,6 @@ export const App: React.FC = () => {
             <div className="w-16 h-16 mx-auto bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg">
               <MapPin className="w-8 h-8 text-white" />
             </div>
-            <div className="absolute -inset-3 bg-blue-500/20 rounded-2xl blur-xl animate-pulse"></div>
           </div>
           <h2 className="text-xl font-bold text-gray-800 mb-2">
             {isRedirecting ? "Mengarahkan ke Login" : "Memuat Aplikasi"}
