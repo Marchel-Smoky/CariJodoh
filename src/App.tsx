@@ -180,7 +180,7 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
   }
 };
 
-// ✅ FIXED: Better ensureUserProfile dengan session validation
+// ✅ FIXED: Perbaiki query select yang bermasalah
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🔍 Checking if profile exists for:", userId);
@@ -193,15 +193,15 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
     
     if (session.user.id !== userId) {
       console.warn("⚠️ Session user ID doesn't match, using session ID:", session.user.id);
-      userId = session.user.id; // Use the actual session ID
+      userId = session.user.id;
     }
     
     await new Promise(resolve => setTimeout(resolve, 1500));
     
-    // Cek apakah profile sudah ada
+    // ✅ FIXED: Perbaiki query select - gunakan string biasa, bukan encoded
     const { data: existingProfile, error } = await supabase
       .from("profiles")
-      .select("*")
+      .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
       .eq("id", userId)
       .maybeSingle();
 
@@ -211,18 +211,114 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
 
     console.log("📊 Existing profile check result:", existingProfile);
 
-    // Jika profile sudah ada, return
     if (existingProfile) {
       console.log("✅ Profile already exists");
       return existingProfile;
     }
 
-    // Jika belum ada, buat profile baru
     console.log("🆕 Profile not found, creating new one...");
     return await createUserProfile(userId, email);
 
   } catch (error) {
     console.error("❌ Ensure profile error:", error);
+    return {
+      gender: "male",
+      avatar_url: null,
+      is_online: true,
+      latitude: null,
+      longitude: null
+    };
+  }
+};
+
+// ✅ FIXED: Juga perbaiki di createUserProfile
+const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
+  try {
+    console.log("🆕 Creating new user profile for:", userId);
+    
+    const { data: { session } } = await supabase.auth.getSession();
+    console.log("🔐 Current session user ID:", session?.user?.id);
+    
+    if (session?.user?.id !== userId) {
+      console.error("❌ USER ID MISMATCH - Session:", session?.user?.id, "Target:", userId);
+      throw new Error("User ID tidak match dengan session");
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const profileData = {
+      id: userId,
+      username: email.split('@')[0] || `user_${userId.slice(0, 8)}`,
+      gender: "male",
+      avatar_url: null,
+      is_online: true,
+      last_online: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      latitude: null,
+      longitude: null,
+      location_updated_at: new Date().toISOString(),
+      age: null,
+      bio: null,
+      interests: null,
+      location: null,
+      public_key: null
+    };
+
+    console.log("📝 Profile data to insert:", profileData);
+
+    // ✅ FIXED: Perbaiki select query setelah insert
+    const { data, error } = await supabase
+      .from("profiles")
+      .insert(profileData)
+      .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
+      .single();
+
+    console.log("🔍 INSERT response - data:", data);
+    console.log("🔍 INSERT response - error:", error);
+
+    if (error) {
+      console.error("❌ Error creating profile:", error);
+      
+      if (error.code === '42501') {
+        console.error("🚫 RLS Policy violation");
+      }
+      
+      if (error.code === '23505') {
+        console.log("🔄 Profile already exists, fetching existing...");
+        const { data: existingData, error: fetchError } = await supabase
+          .from("profiles")
+          .select("gender, avatar_url, latitude, longitude, is_online, username, age, bio, interests, location, last_online, public_key")
+          .eq("id", userId)
+          .single();
+        
+        if (!fetchError && existingData) {
+          console.log("✅ Using existing profile");
+          return existingData;
+        }
+      }
+      
+      console.log("🔄 Retrying profile creation after error...");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      const { data: retryData, error: retryError } = await supabase
+        .from("profiles")
+        .insert(profileData)
+        .select("gender, avatar_url, latitude, longitude, is_online")
+        .single();
+
+      if (!retryError && retryData) {
+        console.log("✅ Profile created on retry");
+        return retryData;
+      }
+      
+      throw error;
+    }
+
+    console.log("✅ New profile created successfully");
+    return data!;
+
+  } catch (error) {
+    console.error("❌ Create profile error:", error);
     return {
       gender: "male",
       avatar_url: null,
@@ -940,3 +1036,4 @@ export const App: React.FC = () => {
 };
 
 export default App;
+
