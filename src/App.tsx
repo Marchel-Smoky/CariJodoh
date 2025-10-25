@@ -47,19 +47,19 @@ const signInWithGoogle = async () => {
   }
 };
 
-// ✅ FIXED: Better auto create profile dengan validasi gender dan error handling
+// ✅ FIXED: Better auto create profile dengan retry mechanism
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🆕 Creating new user profile for:", userId);
     
-    // Pastikan gender valid sesuai constraint database
-    const validGender = "male"; // Default value yang sesuai dengan constraint
+    // Tunggu sebentar untuk pastikan auth transaction selesai
+    await new Promise(resolve => setTimeout(resolve, 500));
     
-    const newProfile = {
+    const profileData = {
       id: userId,
-      username: email.split('@')[0],
+      username: email.split('@')[0] || `user_${userId.slice(0, 8)}`,
       email: email,
-      gender: validGender, // PASTIKAN ini 'male' atau 'female'
+      gender: "male" as const,
       avatar_url: null,
       is_online: true,
       last_online: new Date().toISOString(),
@@ -70,58 +70,39 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
       location_updated_at: new Date().toISOString()
     };
 
-    console.log("📝 Profile data to insert:", newProfile);
+    console.log("📝 Profile data to insert:", profileData);
 
     const { data, error } = await supabase
       .from("profiles")
-      .insert(newProfile)
+      .insert(profileData)
       .select("gender, avatar_url, latitude, longitude, is_online")
       .single();
 
     if (error) {
       console.error("❌ Error creating profile:", error);
       
-      // Detailed error handling
-      if (error.code === '23505') { // Unique violation - profile sudah ada
+      // Jika profile sudah ada, fetch yang existing
+      if (error.code === '23505') {
         console.log("🔄 Profile already exists, fetching existing...");
-        const { data: existingData } = await supabase
+        const { data: existingData, error: fetchError } = await supabase
           .from("profiles")
           .select("gender, avatar_url, latitude, longitude, is_online")
           .eq("id", userId)
           .single();
         
-        if (existingData) {
+        if (!fetchError && existingData) {
           console.log("✅ Using existing profile");
           return existingData;
         }
       }
       
-      if (error.code === '23514') { // Check constraint violation (gender)
-        console.error("❌ Gender constraint violation, retrying with valid gender...");
-        // Coba dengan gender yang valid
-        const fallbackProfile = {
-          ...newProfile,
-          gender: "male" // Force valid gender
-        };
-        
-        const { data: fallbackData, error: fallbackError } = await supabase
-          .from("profiles")
-          .insert(fallbackProfile)
-          .select("gender, avatar_url, latitude, longitude, is_online")
-          .single();
-
-        if (!fallbackError && fallbackData) {
-          console.log("✅ Profile created with fixed gender");
-          return fallbackData;
-        }
-      }
-      
-      // Coba minimal profile creation
+      // Coba dengan data minimal
       console.log("🔄 Trying minimal profile creation...");
       const minimalProfile = {
         id: userId,
         username: email.split('@')[0],
-        gender: "male",
+        email: email,
+        gender: "male" as const,
         is_online: true,
         last_online: new Date().toISOString()
       };
@@ -145,37 +126,58 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
 
   } catch (error) {
     console.error("❌ Create profile error:", error);
-    // Return default profile dengan gender yang valid
+    // Return default profile
     return {
-      gender: "male", // PASTIKAN valid
+      gender: "male",
       avatar_url: null,
-      is_online: true
+      is_online: true,
+      latitude: null,
+      longitude: null
     };
   }
 };
 
-// ✅ FIXED: Cek dan ensure user profile dengan retry logic
+// ✅ FIXED: Better ensureUserProfile dengan retry logic
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
     console.log("🔍 Checking if profile exists for:", userId);
     
-    // Cek apakah profile sudah ada
-    const { data: existingProfile, error } = await supabase
-      .from("profiles")
-      .select("gender, avatar_url, latitude, longitude, is_online")
-      .eq("id", userId)
-      .maybeSingle();
+    // Tunggu sebentar untuk memastikan auth transaction selesai
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Cek apakah profile sudah ada dengan retry
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (retryCount < maxRetries) {
+      try {
+        const { data: existingProfile, error } = await supabase
+          .from("profiles")
+          .select("gender, avatar_url, latitude, longitude, is_online")
+          .eq("id", userId)
+          .maybeSingle();
 
-    if (error && error.code !== 'PGRST116') {
-      console.error("Error checking profile:", error);
-    }
+        if (error && error.code !== 'PGRST116') {
+          console.error("Error checking profile:", error);
+        }
 
-    console.log("📊 Existing profile check result:", existingProfile);
+        console.log("📊 Existing profile check result:", existingProfile);
 
-    // Jika profile sudah ada, return
-    if (existingProfile) {
-      console.log("✅ Profile already exists");
-      return existingProfile;
+        // Jika profile sudah ada, return
+        if (existingProfile) {
+          console.log("✅ Profile already exists");
+          return existingProfile;
+        }
+
+        // Jika belum ada, break loop dan buat profile baru
+        break;
+        
+      } catch (error) {
+        retryCount++;
+        console.log(`🔄 Retry ${retryCount}/${maxRetries} for profile check`);
+        if (retryCount === maxRetries) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+      }
     }
 
     // Jika belum ada, buat profile baru
@@ -184,10 +186,13 @@ const ensureUserProfile = async (userId: string, email: string): Promise<UserPro
 
   } catch (error) {
     console.error("❌ Ensure profile error:", error);
+    // Return default profile yang aman
     return {
       gender: "male",
       avatar_url: null,
-      is_online: true
+      is_online: true,
+      latitude: null,
+      longitude: null
     };
   }
 };
@@ -245,7 +250,7 @@ export const App: React.FC = () => {
   const [profileCreated, setProfileCreated] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // ✅ FIXED: Better auth state listener dengan error handling
+  // ✅ FIXED: Better auth state listener dengan delay untuk pastikan profile sync
   useEffect(() => {
     const {
       data: { subscription },
@@ -267,6 +272,9 @@ export const App: React.FC = () => {
           localStorage.setItem("user", JSON.stringify(userData));
 
           setLoadStep("Membuat profil...");
+          
+          // Tunggu sebentar untuk pastikan auth process complete
+          await new Promise(resolve => setTimeout(resolve, 1500));
           
           // Auto create profile dengan retry mechanism
           let retryCount = 0;
@@ -352,6 +360,9 @@ export const App: React.FC = () => {
           localStorage.setItem("user", JSON.stringify(userData));
 
           setLoadStep("Menyiapkan profil...");
+          
+          // Tunggu sebentar untuk pastikan semua process sync
+          await new Promise(resolve => setTimeout(resolve, 1000));
           
           // Ensure profile exists
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
@@ -874,5 +885,3 @@ export const App: React.FC = () => {
 };
 
 export default App;
-
-
