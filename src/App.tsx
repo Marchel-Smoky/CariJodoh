@@ -31,12 +31,10 @@ const getAvatarUrl = (avatarUrl: string | null | undefined): string | null => {
   if (!avatarUrl) return null;
   
   try {
-    // Jika avatar_url sudah berupa URL lengkap, return langsung
     if (avatarUrl.startsWith('http')) {
       return avatarUrl;
     }
     
-    // Jika avatar_url adalah path di storage, dapatkan URL dari Supabase
     const { data } = supabase.storage
       .from('avatars')
       .getPublicUrl(avatarUrl);
@@ -63,12 +61,7 @@ const signInWithGoogle = async () => {
       }
     });
     
-    if (error) {
-      console.error("❌ Login error:", error.message);
-      throw error;
-    }
-    
-    console.log("✅ Google OAuth initiated successfully");
+    if (error) throw error;
     return data;
   } catch (error) {
     console.error("❌ Google sign in failed:", error);
@@ -76,23 +69,18 @@ const signInWithGoogle = async () => {
   }
 };
 
-// ✅ FIXED: Single createUserProfile function tanpa duplikasi
+// ✅ EMERGENCY FIX: Gunakan raw fetch untuk menghindari Supabase client bug
 const createUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
-    console.log("🆕 Creating new user profile for:", userId);
+    console.log("🆕 EMERGENCY FIX: Creating profile for:", userId);
     
-    // Pastikan session sudah fully loaded
     const { data: { session } } = await supabase.auth.getSession();
-    console.log("🔐 Current session user ID:", session?.user?.id);
-    console.log("🔐 Target user ID:", userId);
+    if (!session) throw new Error("No session");
     
-    // Pastikan ID match dengan session
-    if (session?.user?.id !== userId) {
-      console.error("❌ USER ID MISMATCH - Session:", session?.user?.id, "Target:", userId);
-      throw new Error("User ID tidak match dengan session");
+    if (session.user.id !== userId) {
+      console.log("🔄 Using session ID:", session.user.id);
+      userId = session.user.id;
     }
-    
-    await new Promise(resolve => setTimeout(resolve, 1000));
     
     const profileData = {
       id: userId,
@@ -112,72 +100,85 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
       public_key: null
     };
 
-    console.log("📝 Profile data to insert:", profileData);
+    console.log("📝 Profile data:", profileData);
 
-    // ✅ FIXED: Gunakan select(*) untuk menghindari error parameter
-    const { data, error } = await supabase
-      .from("profiles")
-      .insert(profileData)
-      .select('*')
-      .single();
+    // ✅ FIX: Gunakan fetch langsung ke Supabase REST API
+    const response = await fetch(`https://rjjdzjrxbemhfoyjnfjs.supabase.co/rest/v1/profiles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+        'apikey': `${process.env.REACT_APP_SUPABASE_ANON_KEY}`, // Ganti dengan anon key Anda
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(profileData)
+    });
 
-    console.log("🔍 INSERT response - data:", data);
-    console.log("🔍 INSERT response - error:", error);
-
-    if (error) {
-      console.error("❌ Error creating profile:", error);
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error("❌ Fetch INSERT error:", errorData);
       
-      // Detailed error handling
-      if (error.code === '42501') {
-        console.error("🚫 RLS Policy violation - Check policy syntax");
-      }
-      
-      if (error.code === '23505') {
-        console.log("🔄 Profile already exists, fetching existing...");
-        const { data: existingData, error: fetchError } = await supabase
-          .from("profiles")
-          .select('*')
-          .eq("id", userId)
-          .single();
+      if (errorData.code === '23505') {
+        console.log("🔄 Profile exists, fetching...");
+        // Jika profile sudah ada, fetch data yang existing
+        const fetchResponse = await fetch(`https://rjjdzjrxbemhfoyjnfjs.supabase.co/rest/v1/profiles?id=eq.${userId}`, {
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`,
+            'apikey': `${process.env.REACT_APP_SUPABASE_ANON_KEY}`,
+          }
+        });
         
-        if (!fetchError && existingData) {
-          console.log("✅ Using existing profile");
-          return existingData;
+        if (fetchResponse.ok) {
+          const existingData = await fetchResponse.json();
+          if (existingData && existingData.length > 0) {
+            console.log("✅ Using existing profile");
+            return existingData[0];
+          }
         }
       }
       
-      // Wait and retry dengan data minimal
-      console.log("🔄 Retrying profile creation after error...");
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const minimalProfile = {
-        id: userId,
-        username: email.split('@')[0],
-        gender: "male",
-        is_online: true,
-        last_online: new Date().toISOString()
-      };
-
-      const { data: retryData, error: retryError } = await supabase
-        .from("profiles")
-        .insert(minimalProfile)
-        .select('*')
-        .single();
-
-      if (!retryError && retryData) {
-        console.log("✅ Profile created on retry");
-        return retryData;
-      }
-      
-      throw error;
+      throw new Error(`Insert failed: ${errorData.message}`);
     }
 
-    console.log("✅ New profile created successfully");
-    return data!;
+    const result = await response.json();
+    console.log("✅ Profile created via fetch:", result[0]);
+    return result[0];
 
   } catch (error) {
     console.error("❌ Create profile error:", error);
-    // Return default profile
+    
+    // Fallback: coba dengan Supabase client tanpa select
+    try {
+      console.log("🔄 Fallback: Trying with minimal data...");
+      const { data, error: fallbackError } = await supabase
+        .from("profiles")
+        .insert({
+          id: userId,
+          username: email.split('@')[0],
+          gender: "male",
+          is_online: true
+        });
+      
+      if (fallbackError) throw fallbackError;
+      
+      // Manual fetch untuk get data
+      const { data: { session } } = await supabase.auth.getSession();
+      const fetchResponse = await fetch(`https://rjjdzjrxbemhfoyjnfjs.supabase.co/rest/v1/profiles?id=eq.${userId}`, {
+        headers: {
+          'Authorization': `Bearer ${session?.access_token}`,
+          'apikey': `${process.env.REACT_APP_SUPABASE_ANON_KEY}`,
+        }
+      });
+      
+      if (fetchResponse.ok) {
+        const result = await fetchResponse.json();
+        return result[0];
+      }
+      
+    } catch (fallbackError) {
+      console.error("❌ Fallback also failed:", fallbackError);
+    }
+    
     return {
       gender: "male",
       avatar_url: null,
@@ -188,63 +189,71 @@ const createUserProfile = async (userId: string, email: string): Promise<UserPro
   }
 };
 
-// ✅ FIXED: ensureUserProfile dengan select yang benar
+// ✅ FIXED: ensureUserProfile dengan fetch approach
 const ensureUserProfile = async (userId: string, email: string): Promise<UserProfile> => {
   try {
-    console.log("🔍 Checking if profile exists for:", userId);
+    console.log("🔍 Checking profile for:", userId);
     
-    // Validasi session dulu
     const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      throw new Error("No active session found");
-    }
+    if (!session) throw new Error("No session");
     
     if (session.user.id !== userId) {
-      console.warn("⚠️ Session user ID doesn't match, using session ID:", session.user.id);
       userId = session.user.id;
     }
-    
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // ✅ FIXED: Gunakan select(*) untuk menghindari error parameter
-    const { data: existingProfile, error } = await supabase
-      .from("profiles")
-      .select('*')
-      .eq("id", userId)
-      .maybeSingle();
 
-    if (error && error.code !== 'PGRST116') {
-      console.error("Error checking profile:", error);
+    // ✅ FIX: Gunakan fetch untuk check existing profile
+    const response = await fetch(`https://rjjdzjrxbemhfoyjnfjs.supabase.co/rest/v1/profiles?id=eq.${userId}`, {
+      headers: {
+        'Authorization': `Bearer ${session.access_token}`,
+        'apikey': `${process.env.REACT_APP_SUPABASE_ANON_KEY}`,
+      }
+    });
+
+    if (response.ok) {
+      const existingData = await response.json();
+      if (existingData && existingData.length > 0) {
+        console.log("✅ Profile exists:", existingData[0]);
+        return existingData[0];
+      }
     }
 
-    console.log("📊 Existing profile check result:", existingProfile);
-
-    if (existingProfile) {
-      console.log("✅ Profile already exists");
-      return existingProfile;
-    }
-
-    console.log("🆕 Profile not found, creating new one...");
+    console.log("🆕 Profile not found, creating...");
     return await createUserProfile(userId, email);
 
   } catch (error) {
     console.error("❌ Ensure profile error:", error);
-    return {
-      gender: "male",
-      avatar_url: null,
-      is_online: true,
-      latitude: null,
-      longitude: null
-    };
+    
+    // Fallback dengan Supabase client
+    try {
+      const { data: existingProfile, error: queryError } = await supabase
+        .from("profiles")
+        .select('*')
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (!queryError && existingProfile) {
+        return existingProfile;
+      }
+
+      return await createUserProfile(userId, email);
+    } catch (fallbackError) {
+      console.error("❌ Fallback failed:", fallbackError);
+      return {
+        gender: "male",
+        avatar_url: null,
+        is_online: true,
+        latitude: null,
+        longitude: null
+      };
+    }
   }
 };
 
 // ✅ LOGOUT dengan delete data user
 const handleLogout = async (userId: string) => {
   try {
-    console.log("🚪 Logging out and cleaning up user data...");
+    console.log("🚪 Logging out...");
     
-    // 1. Update status online menjadi false
     await supabase
       .from("profiles")
       .update({
@@ -253,26 +262,18 @@ const handleLogout = async (userId: string) => {
       })
       .eq("id", userId);
 
-    // 2. Sign out dari auth (ini akan trigger ON DELETE CASCADE di database)
     const { error } = await supabase.auth.signOut();
-    if (error) {
-      console.error("Sign out error:", error);
-      throw error;
-    }
+    if (error) throw error;
 
-    // 3. Clear local storage
     localStorage.removeItem("user");
     localStorage.removeItem("userLocation");
     localStorage.removeItem("userLocationTime");
 
     console.log("✅ Logout successful");
-    
-    // 4. Redirect ke halaman login
     window.location.reload();
     
   } catch (error) {
     console.error("Logout error:", error);
-    // Force reload anyway
     window.location.reload();
   }
 };
@@ -286,22 +287,19 @@ export const App: React.FC = () => {
   const [loadStep, setLoadStep] = useState<string>("Mengecek sesi...");
   const [showSidebar, setShowSidebar] = useState(false);
   const [nearbyUsers, setNearbyUsers] = useState<any[]>([]);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const [userEmail, setUserEmail] = useState<string>("");
   const [profileCreated, setProfileCreated] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // ✅ FIXED: Better auth state listener dengan delay untuk pastikan profile sync
+  // ✅ Auth state listener
   useEffect(() => {
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log(`🔄 Auth state changed: ${event}`, session);
+    const { subscription } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log(`🔄 Auth state: ${event}`);
       
       try {
         if (event === 'SIGNED_IN' && session) {
-          console.log("✅ User signed in, setting up profile...");
+          console.log("✅ User signed in");
           setAuthError(null);
           
           const userData = { 
@@ -315,10 +313,9 @@ export const App: React.FC = () => {
 
           setLoadStep("Membuat profil...");
           
-          // Tunggu sebentar untuk pastikan auth process complete
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          // Tunggu untuk session stabil
+          await new Promise(resolve => setTimeout(resolve, 2000));
           
-          // Auto create profile dengan retry mechanism
           let retryCount = 0;
           const maxRetries = 3;
           
@@ -326,30 +323,21 @@ export const App: React.FC = () => {
             try {
               const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
               setCurrentUserGender(userProfile.gender || "male");
-              
-              // ✅ FIXED: Set avatar URL dengan fungsi getAvatarUrl
-              const avatarUrl = getAvatarUrl(userProfile.avatar_url);
-              setCurrentUserAvatar(avatarUrl);
-              
+              setCurrentUserAvatar(getAvatarUrl(userProfile.avatar_url));
               setProfileCreated(true);
               
               console.log("✅ Profile setup completed");
-              
-              // Set online status
               await updateOnlineStatus(session.user.id, true);
-              
               setLoading(false);
               setIsRedirecting(false);
             } catch (error) {
-              console.error(`❌ Profile setup failed (attempt ${retryCount + 1}/${maxRetries}):`, error);
+              console.error(`❌ Profile setup failed (${retryCount + 1}/${maxRetries}):`, error);
               
               if (retryCount < maxRetries) {
                 retryCount++;
-                console.log(`🔄 Retrying profile creation... (${retryCount}/${maxRetries})`);
                 setTimeout(createProfileWithRetry, 1000 * retryCount);
               } else {
-                console.error("❌ Max retries reached");
-                setAuthError("Gagal membuat profil pengguna. Silakan coba lagi.");
+                setAuthError("Gagal membuat profil. Silakan coba lagi.");
                 setLoading(false);
                 setIsRedirecting(false);
               }
@@ -367,17 +355,8 @@ export const App: React.FC = () => {
           setProfileCreated(false);
           setLoading(false);
         }
-        else if (event === 'USER_UPDATED') {
-          console.log("👤 User updated");
-        }
-        else if (event === 'TOKEN_REFRESHED') {
-          console.log("🔄 Token refreshed");
-        }
-        else if (event === 'INITIAL_SESSION') {
-          console.log("🔧 Initial session loaded");
-        }
       } catch (error) {
-        console.error("❌ Auth state change error:", error);
+        console.error("❌ Auth state error:", error);
         setAuthError("Terjadi kesalahan saat memproses login.");
         setLoading(false);
         setIsRedirecting(false);
@@ -387,7 +366,7 @@ export const App: React.FC = () => {
     return () => subscription.unsubscribe();
   }, []);
 
-  // ✅ Initialize app - cek session yang ada
+  // ✅ Initialize app
   useEffect(() => {
     const init = async () => {
       try {
@@ -406,23 +385,15 @@ export const App: React.FC = () => {
           localStorage.setItem("user", JSON.stringify(userData));
 
           setLoadStep("Menyiapkan profil...");
-          
-          // Tunggu sebentar untuk pastikan semua process sync
           await new Promise(resolve => setTimeout(resolve, 1000));
           
-          // Ensure profile exists
           const userProfile = await ensureUserProfile(session.user.id, session.user.email!);
           setCurrentUserGender(userProfile.gender || "male");
-          
-          // ✅ FIXED: Set avatar URL dengan fungsi getAvatarUrl
-          const avatarUrl = getAvatarUrl(userProfile.avatar_url);
-          setCurrentUserAvatar(avatarUrl);
-          
+          setCurrentUserAvatar(getAvatarUrl(userProfile.avatar_url));
           setProfileCreated(true);
 
           setLoadStep("Menyiapkan peta...");
           
-          // Load initial nearby users
           const cachedLocation = getCachedLocation();
           if (cachedLocation) {
             setLocation(cachedLocation);
@@ -433,13 +404,12 @@ export const App: React.FC = () => {
           setLoading(false);
           
         } else {
-          // Tidak ada session, tampilkan login screen
           console.log("🔐 No session found");
           setLoading(false);
         }
       } catch (error) {
         console.error("❌ Initialization error:", error);
-        setAuthError("Gagal memuat aplikasi. Silakan refresh halaman.");
+        setAuthError("Gagal memuat aplikasi.");
         setLoading(false);
       }
     };
@@ -447,14 +417,14 @@ export const App: React.FC = () => {
     init();
   }, []);
 
-  // ✅ HYBRID: Smart location tracking dengan optimized updates
+  // ✅ HYBRID: Smart location tracking
   const startLocationTracking = useCallback((userId: string) => {
     if (!profileCreated) {
-      console.log("⏳ Waiting for profile to be created before starting location tracking...");
+      console.log("⏳ Waiting for profile creation...");
       return () => {};
     }
 
-    console.log("🚀 Starting hybrid location tracking...");
+    console.log("🚀 Starting location tracking...");
     
     let lastServerUpdate = 0;
     let lastSavedLocation: [number, number] | null = null;
@@ -474,15 +444,12 @@ export const App: React.FC = () => {
         
         lastServerUpdate = Date.now();
         lastSavedLocation = newLocation;
-        console.log(`📍 Location updated (${reason})`);
       } catch (error) {
         console.error("Location update failed:", error);
       }
     };
 
     const shouldUpdateToServer = (newLocation: [number, number]): boolean => {
-      const now = Date.now();
-      
       if (!lastSavedLocation) return true;
       
       const distance = calculateDistance(
@@ -491,12 +458,11 @@ export const App: React.FC = () => {
       );
       if (distance > 0.5) return true;
       
-      if (now - lastServerUpdate > 15 * 60 * 1000) return true;
+      if (Date.now() - lastServerUpdate > 15 * 60 * 1000) return true;
       
       return false;
     };
 
-    // Start GPS tracking
     watchId = navigator.geolocation.watchPosition(
       (position) => {
         const newLocation: [number, number] = [
@@ -512,7 +478,7 @@ export const App: React.FC = () => {
         }
       },
       (error) => {
-        console.error("Location tracking error:", error);
+        console.error("Location error:", error);
         getCityLevelLocation().then(fallbackLocation => {
           if (fallbackLocation) {
             setLocation(fallbackLocation);
@@ -529,9 +495,7 @@ export const App: React.FC = () => {
     );
 
     return () => {
-      if (watchId) {
-        navigator.geolocation.clearWatch(watchId);
-      }
+      if (watchId) navigator.geolocation.clearWatch(watchId);
     };
   }, [profileCreated]);
 
@@ -543,7 +507,7 @@ export const App: React.FC = () => {
     }
   }, [user?.id, profileCreated, startLocationTracking]);
 
-  // ✅ HYBRID: Optimized nearby users loading - DENGAN AVATAR URL
+  // ✅ HYBRID: Optimized nearby users loading
   const loadNearbyUsers = useCallback(async (currentUserId: string, userLocation: [number, number] | null) => {
     if (!userLocation || !profileCreated) return;
 
@@ -564,17 +528,12 @@ export const App: React.FC = () => {
         .gte("location_updated_at", twoHoursAgo)
         .limit(25);
 
-      if (error) {
-        console.error("Supabase query error:", error);
-        throw error;
-      }
+      if (error) throw error;
 
       if (data) {
-        // ✅ FIXED: Process users dengan avatar URL yang benar
         const usersWithDistance = data
           .map(user => ({
             ...user,
-            // ✅ Tambahkan avatar_url yang sudah diproses
             avatar_url: getAvatarUrl(user.avatar_url),
             distance: calculateDistance(
               userLocation[0], userLocation[1],
@@ -586,7 +545,7 @@ export const App: React.FC = () => {
           .slice(0, 20);
 
         setNearbyUsers(usersWithDistance);
-        console.log(`📍 Loaded ${usersWithDistance.length} nearby users with avatars`);
+        console.log(`📍 Loaded ${usersWithDistance.length} nearby users`);
       }
     } catch (error) {
       console.error("Nearby users error:", error);
@@ -610,7 +569,6 @@ export const App: React.FC = () => {
         },
         (payload) => {
           if (mounted && location) {
-            console.log('🔄 Real-time update, refreshing nearby users...');
             loadNearbyUsers(user.id, location);
           }
         }
@@ -719,24 +677,16 @@ export const App: React.FC = () => {
     }
   };
 
-  // ✅ Manual login handler dengan better error reporting
+  // ✅ Manual login handler
   const handleManualLogin = async () => {
     setIsRedirecting(true);
     setAuthError(null);
     setLoadStep("Mengarahkan ke Google...");
     try {
-      console.log("🔐 Attempting Google login...");
-      const result = await signInWithGoogle();
-      
-      if (!result) {
-        throw new Error("Google login returned no result");
-      }
-      
-      console.log("✅ Google login initiated successfully");
+      await signInWithGoogle();
     } catch (error: any) {
       console.error("❌ Manual login failed:", error);
       
-      // Tampilkan error ke user
       if (error.message?.includes('popup')) {
         setAuthError("Popup login diblokir. Izinkan popup untuk website ini.");
       } else if (error.message?.includes('configuration')) {
