@@ -28,15 +28,10 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 // 3️⃣ TypeScript Type Definitions
 // ==============================================
 
-/**
- * Tabel `profiles`
- * Pastikan sesuai dengan definisi database kamu:
- * id (uuid), username, avatar_url, age, bio, interests, latitude, longitude, dll.
- */
 export interface UserProfile {
   id: string
   username: string | null
-  avatar_url: string | null // contoh: "avatars/<user>.jpg"
+  avatar_url: string | null
   age: number | null
   bio: string | null
   interests: string[] | null
@@ -47,12 +42,10 @@ export interface UserProfile {
   latitude: number | null
   longitude: number | null
   gender: "male" | "female" | null
+  location_updated_at: string | null
+  public_key: string | null
 }
 
-/**
- * Tabel `chat_messages`
- * Untuk pesan antar user.
- */
 export interface ChatMessage {
   id: string
   sender_id: string
@@ -62,10 +55,6 @@ export interface ChatMessage {
   is_read: boolean
 }
 
-/**
- * Tabel `video_sessions`
- * Untuk fitur video call.
- */
 export interface VideoSession {
   id: string
   initiator_id: string
@@ -82,7 +71,15 @@ export interface VideoSession {
  * Contoh:
  * getPublicUrl("avatars/john_doe.jpg")
  */
-export const getPublicUrl = (path: string | null): string => {
+export const getStoragePublicUrl = (path: string | null): string => {
   if (!path) return "/noprofile.png"
-  return `${SUPABASE_URL}/storage/v1/object/public/${path}`
+  
+  // ✅ FIXED: Gunakan approach yang konsisten
+  if (path.startsWith('http')) {
+    return path;
+  }
+  
+  // ✅ Gunakan method yang benar dari Supabase client
+  const { data } = supabase.storage.from('avatars').getPublicUrl(path);
+  return data.publicUrl;
 }
